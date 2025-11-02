@@ -1,0 +1,6 @@
+2025/11/02 06:10:06.396550 from 127.0.0.1:55914 accepted tcp:127.0.0.1:31234 [t-inbound-1 -> r-outbound-1]
+2025/11/02 06:10:06.397056 from 127.0.0.1:55926 accepted tcp:127.0.0.1:31234 [t-inbound-1 -> r-outbound-1]
+2025/11/02 06:10:06.402048 from tcp:127.0.0.1:55914 accepted tcp:127.0.0.1:31234 [r-inbound-0 -> local-web-0]
+2025/11/02 06:10:06.500498 from tcp:127.0.0.1:55926 accepted tcp:127.0.0.1:31234 [r-inbound-0 -> local-web-0]
+2025/11/02 06:10:06.671286 from 127.0.0.1:55930 accepted tcp:127.0.0.1:31234 [t-inbound-1 -> r-outbound-1]
+2025/11/02 06:10:06.775191 from tcp:127.0.0.1:55930 accepted tcp:127.0.0.1:31234 [r-inbound-0 -> local-web-0]

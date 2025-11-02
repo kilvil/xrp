@@ -5,37 +5,54 @@ This repo contains two services to manage Xray reverse proxying:
 - `xrps` (server/portal): create and manage reverse tunnels; generate Base64 connection params for clients. XRPS only defines how to connect to the server (portal addr, REALITY handshake, entry ports). It does not decide the forwarding destination.
 - `xrpc` (client/bridge): paste Base64 params to connect; shows status, logs and reconnection events. XRPC decides each tunnel’s forwarding target `ip:port` (default `127.0.0.1:mapPort`) and can change it at runtime.
 
-Note: current implementation is a functional scaffold without xray-core integration. It provides the API/flow, SSE logs, and in-memory management so we can iterate quickly and later plug in xray orchestration.
+Note: xray-core is now embedded in-process by default. Services build an Xray JSON config (REALITY + Reverse v4) and start a core instance internally, writing `./logs/*.log` for access/error and exposing restart endpoints. You can still point to an external config via `XRAY_CFG_PORTAL`/`XRAY_CFG_BRIDGE` for debugging.
 
 ## Quick start
 
 - Run XRPS (server):
   - `go run ./xrps -addr :8080`
   - Health: `GET /healthz`
-  - REALITY helpers:
+- REALITY helpers (keys use base64url without padding):
     - `GET /api/reality/x25519` → `{ privateKey, publicKey }` (base64)
     - `GET /api/reality/mldsa65` → `{ seed (base64), seedHex, verifyHex }`
   - Create tunnel: `POST /api/tunnels` (see payload below)
   - Generate params: `POST /api/tunnels/{id}/connection-params`
   - System events (SSE): `GET /logs/stream`
   - Xray file logs:
-    - Tail: `GET /api/logs?type=access|error&tail=200`
-    - Streams: `GET /logs/access/stream`, `GET /logs/error/stream`
+    - Tail: `GET /api/logs?type=access|error&tail=200` (tail<=0 returns full file)
+    - Streams: `GET /logs/access/stream`, `GET /logs/error/stream` (stream starts from file head, then follows)
     - Configure log dir via env `XRPS_LOG_DIR` (default `./logs`)
 
 - Run XRPC (client):
   - `go run ./xrpc -addr :8081`
   - Health: `GET /healthz`
-  - REALITY helpers (mirror): `GET /api/reality/x25519`, `GET /api/reality/mldsa65`
+  - REALITY helpers (mirror, base64url): `GET /api/reality/x25519`, `GET /api/reality/mldsa65`
   - Apply profile: `POST /api/profile/apply` with `{ "base64": "..." }` or raw Base64 body
   - List tunnels: `GET /api/tunnels` (with target field)
   - Update per-tunnel: `PATCH /api/tunnels/{id}` with `{ map_port?, active?, target? }`
   - Status: `GET /status`
   - System events (SSE): `GET /logs/stream`
   - Xray file logs:
-    - Tail: `GET /api/logs?type=access|error&tail=200`
-    - Streams: `GET /logs/access/stream`, `GET /logs/error/stream`
+    - Tail: `GET /api/logs?type=access|error&tail=200` (tail<=0 returns full file)
+    - Streams: `GET /logs/access/stream`, `GET /logs/error/stream` (stream starts from file head, then follows)
     - Configure log dir via env `XRPC_LOG_DIR` (default `./logs`)
+
+Core control (placeholder until xray-core embed is wired):
+- Restart: `POST /api/core/restart` (both XRPS and XRPC)
+
+Xray integration
+- Embedded core: requires Go to fetch `github.com/xtls/xray-core`. Set `XRAY_LOCATION_ASSET` (or per-service `XRPS_XRAY_ASSET`/`XRPC_XRAY_ASSET`) if you need custom geo files. REALITY keys must be base64url (no padding).
+
+Encryption policy
+- XRPS API 不接受 `encryption: "pq"`。请使用 `"none"`（Vision）或完整 PQ 串（以 `mlkem768x25519plus.` 开头）。
+- Optional config overrides:
+  - XRPS reads `XRAY_CFG_PORTAL` (path to JSON). If set, XRPS uses this file instead of generated config and writes a copy to `xray.portal.json` in run dir.
+  - XRPC reads `XRAY_CFG_BRIDGE` (path to JSON). If set, XRPC uses this file and writes a copy to `xray.bridge.json` in run dir.
+- Simulate failures: `XRPS_CORE_FAIL=true` or `XRPC_CORE_FAIL=true`.
+
+Run directories and ports
+- Per-service run dir: `XRPS_XRAY_RUN_DIR`, `XRPC_XRAY_RUN_DIR` (defaults to log dir) — a copy of the effective config is written here.
+- Per-service internal API inbound port (diagnostic): `XRPS_XRAY_API_PORT` (default 10085), `XRPC_XRAY_API_PORT` (default 10086). If busy, a free port is auto-selected.
 
 Tips
 - In dev, you can simulate log streaming by appending lines to `./logs/access.log` or `./logs/error.log`; the SSE endpoints will push new lines.
@@ -50,7 +67,7 @@ POST `/api/tunnels`
   "portal_addr": "portal.example.com",
   "handshake_port": 9443,
   "server_name": "www.fandom.com",
-  "encryption": "pq",
+  "encryption": "none",
   "entry_ports": [31234, 31235],
   "enable_forward": false,
   "forward_port": 443
@@ -70,7 +87,7 @@ Paste that Base64 into XRPC via `POST /api/profile/apply`.
 
 ## Build
 
-- Root module: `go 1.21`, no external deps for the scaffold.
+- Root module: `go 1.21`. External runtime dep: xray binary (provided via `XRAY_BIN`).
 - Build binaries:
   - `go build -o bin/xrps ./xrps`
   - `go build -o bin/xrpc ./xrpc`

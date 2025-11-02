@@ -128,7 +128,8 @@ function TunnelForm({ onCreated }: { onCreated: (t: Tunnel) => void }) {
     portal_addr: 'portal.example.com',
     handshake_port: 9443,
     server_name: 'www.fandom.com',
-    encryption: 'pq',
+    // Align with backend: default to none; advanced PQ must start with mlkem768x25519plus.
+    encryption: 'none',
     entry_ports: [31234, 31235],
     enable_forward: false,
     forward_port: 443,
@@ -136,13 +137,19 @@ function TunnelForm({ onCreated }: { onCreated: (t: Tunnel) => void }) {
   const [submitting, setSubmitting] = React.useState(false)
   const [privKey, setPrivKey] = React.useState('')
   const [pqSeed, setPqSeed] = React.useState('')
+  // Support PQ per backend policy: none or mlkem768x25519plus.*
+  const [encryptionMode, setEncryptionMode] = React.useState<'none' | 'custom'>(
+    'none'
+  )
+  const [customEnc, setCustomEnc] = React.useState<string>('')
 
   const set = (k: keyof CreateTunnelReq, v: any) => setForm(s => ({ ...s, [k]: v }))
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     setSubmitting(true)
     try {
-      const t = await API.createTunnel(form)
+      const payload: CreateTunnelReq = { ...form, private_key: privKey || undefined }
+      const t = await API.createTunnel(payload)
       onCreated(t)
     } finally {
       setSubmitting(false)
@@ -173,11 +180,42 @@ function TunnelForm({ onCreated }: { onCreated: (t: Tunnel) => void }) {
         </div>
         <div>
           <Label>加密</Label>
-          <select className="w-full border-4 border-black dark:border-white px-3 py-2 bg-white dark:bg-zinc-800 text-black dark:text-white" value={form.encryption} onChange={e => set('encryption', e.target.value)}>
-            <option value="x25519">x25519</option>
-            <option value="pq">pq</option>
+          <select
+            className="w-full border-4 border-black dark:border-white px-3 py-2 bg-white dark:bg-zinc-800 text-black dark:text-white"
+            value={encryptionMode}
+            onChange={e => {
+              const mode = e.target.value as 'none' | 'custom'
+              setEncryptionMode(mode)
+              if (mode === 'none') {
+                set('encryption', 'none')
+              } else {
+                const next = customEnc || 'mlkem768x25519plus.'
+                setCustomEnc(next)
+                set('encryption', next)
+              }
+            }}
+          >
             <option value="none">none</option>
+            <option value="custom">后量子（mlkem768x25519plus.*）</option>
           </select>
+          {encryptionMode === 'custom' && (
+            <div className="mt-2 space-y-1">
+              <Input
+                value={customEnc}
+                onChange={e => {
+                  const v = e.target.value
+                  setCustomEnc(v)
+                  set('encryption', v)
+                }}
+                placeholder="mlkem768x25519plus.your-params"
+              />
+              {!customEnc.startsWith('mlkem768x25519plus.') && (
+                <div className="text-xs text-red-600 dark:text-red-400">
+                  需要以 mlkem768x25519plus. 开头，示例：mlkem768x25519plus.xyz
+                </div>
+              )}
+            </div>
+          )}
         </div>
         <div>
           <Label>传输端口（逗号分隔）</Label>
@@ -201,14 +239,14 @@ function TunnelForm({ onCreated }: { onCreated: (t: Tunnel) => void }) {
               const { publicKey, privateKey } = await API.newX25519()
               set('public_key', publicKey)
               setPrivKey(privateKey)
-            }}>生成证书</button>
+            }}>生成密钥对</button>
           </div>
-          <Input value={form.public_key || ''} onChange={e => set('public_key', e.target.value)} placeholder="base64" />
+          <Input value={form.public_key || ''} onChange={e => set('public_key', e.target.value)} placeholder="base64url(32 bytes)" />
         </div>
         <div>
           <Label>Private Key（仅服务器保存）</Label>
-          <Input value={privKey} onChange={e => setPrivKey(e.target.value)} placeholder="base64" />
-        </div>
+          <Input value={privKey} onChange={e => setPrivKey(e.target.value)} placeholder="base64url(32 bytes)" />
+          </div>
         <div>
           <div className="flex items-center justify-between">
             <Label>Short ID</Label>
@@ -227,7 +265,12 @@ function TunnelForm({ onCreated }: { onCreated: (t: Tunnel) => void }) {
           <Input value={pqSeed} onChange={e => setPqSeed(e.target.value)} placeholder="mldsa65 seed (hex)" />
         </div>
       </div>
-      <Button disabled={submitting} type="submit">{submitting ? '创建中…' : '创建'}</Button>
+      {(() => {
+        const encValid = encryptionMode === 'none' || (customEnc && customEnc.startsWith('mlkem768x25519plus.'))
+        return (
+          <Button disabled={submitting || !encValid} type="submit">{submitting ? '创建中…' : '创建'}</Button>
+        )
+      })()}
     </form>
   )
 }

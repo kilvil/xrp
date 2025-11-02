@@ -27,8 +27,19 @@ const API = {
     if (!res.ok) throw new Error(await res.text())
     return res.json()
   },
+  async coreRestart(): Promise<{ ok: boolean; message?: string }> {
+    const res = await fetch('/api/core/restart', { method: 'POST' })
+    if (!res.ok) throw new Error(await res.text())
+    return res.json()
+  },
   async listTunnels(): Promise<TunnelState[]> {
     const res = await fetch('/api/tunnels')
+    if (!res.ok) throw new Error(await res.text())
+    return res.json()
+  },
+  async tailLogs(type: 'access' | 'error', tail: number = 200): Promise<{ type: string; path: string; lines: string[] }> {
+    const q = new URLSearchParams({ type, tail: String(tail) })
+    const res = await fetch(`/api/logs?${q.toString()}`)
     if (!res.ok) throw new Error(await res.text())
     return res.json()
   },
@@ -41,8 +52,16 @@ const API = {
     if (!res.ok) throw new Error(await res.text())
     return res.json()
   },
+  // Logs SSE streams (aligned with XRPS/XRPC backends)
+  makeAccessLogStream(): EventSource {
+    return new EventSource('/logs/access/stream')
+  },
+  makeErrorLogStream(): EventSource {
+    return new EventSource('/logs/error/stream')
+  },
+  // Backward-compat alias (defaults to access logs)
   makeLogStream(): EventSource {
-    return new EventSource('/logs/stream')
+    return this.makeAccessLogStream()
   }
 }
 

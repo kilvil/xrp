@@ -1,0 +1,111 @@
+{
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": 43247,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1",
+        "port": 1
+      },
+      "tag": "api"
+    }
+  ],
+  "log": {
+    "loglevel": "warning"
+  },
+  "outbounds": [
+    {
+      "protocol": "direct",
+      "tag": "default"
+    },
+    {
+      "protocol": "freedom",
+      "settings": {
+        "redirect": "127.0.0.1:80"
+      },
+      "tag": "local-web-0"
+    },
+    {
+      "mux": {
+        "enabled": false
+      },
+      "protocol": "vless",
+      "settings": {
+        "address": "portal.example.com",
+        "encryption": "pq",
+        "flow": "xtls-rprx-vision",
+        "id": "d29442c5-7149-43f6-9e33-a5413dae166c",
+        "port": 9443,
+        "reverse": {
+          "tag": "r-inbound-0"
+        }
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "+ejlQ87rIwGRC2imbVdsPS9k/xVOOWdlzcqey0FK4Es=",
+          "serverName": "www.fandom.com",
+          "shortId": "dfb400080112fb77",
+          "spiderX": "/"
+        },
+        "security": "reality"
+      },
+      "tag": "rev-link-0"
+    },
+    {
+      "protocol": "freedom",
+      "settings": {
+        "redirect": "127.0.0.1:81"
+      },
+      "tag": "local-web-1"
+    },
+    {
+      "mux": {
+        "enabled": false
+      },
+      "protocol": "vless",
+      "settings": {
+        "address": "portal.example.com",
+        "encryption": "pq",
+        "flow": "xtls-rprx-vision",
+        "id": "45dd591a-ffe0-456f-a070-6b6c7ade3a8d",
+        "port": 9443,
+        "reverse": {
+          "tag": "r-inbound-1"
+        }
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "+ejlQ87rIwGRC2imbVdsPS9k/xVOOWdlzcqey0FK4Es=",
+          "serverName": "www.fandom.com",
+          "shortId": "dfb400080112fb77",
+          "spiderX": "/"
+        },
+        "security": "reality"
+      },
+      "tag": "rev-link-1"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "inboundTag": [
+          "r-inbound-0"
+        ],
+        "outboundTag": "local-web-0",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "r-inbound-1"
+        ],
+        "outboundTag": "local-web-1",
+        "type": "field"
+      }
+    ]
+  }
+}

@@ -40,6 +40,7 @@ export type CreateTunnelReq = {
   forward_port: number
   public_key?: string
   short_id?: string
+  private_key?: string
 }
 
 const API = {
@@ -75,17 +76,36 @@ const API = {
     if (!res.ok) throw new Error(await res.text())
     return res.json()
   },
+  async coreRestart(): Promise<{ ok: boolean; message?: string }> {
+    const res = await fetch('/api/core/restart', { method: 'POST' })
+    if (!res.ok) throw new Error(await res.text())
+    return res.json()
+  },
   async deleteTunnel(id: string): Promise<void> {
     const res = await fetch(`/api/tunnels/${id}`, { method: 'DELETE' })
     if (!res.ok && res.status !== 204) throw new Error(await res.text())
+  },
+  async tailLogs(type: 'access' | 'error', tail: number = 200): Promise<{ type: string; path: string; lines: string[] }> {
+    const q = new URLSearchParams({ type, tail: String(tail) })
+    const res = await fetch(`/api/logs?${q.toString()}`)
+    if (!res.ok) throw new Error(await res.text())
+    return res.json()
   },
   async genParams(id: string): Promise<{ json: string; base64: string }> {
     const res = await fetch(`/api/tunnels/${id}/connection-params`, { method: 'POST' })
     if (!res.ok) throw new Error(await res.text())
     return res.json()
   },
+  // Logs SSE streams (aligned with XRPS/XRPC backends)
+  makeAccessLogStream(): EventSource {
+    return new EventSource('/logs/access/stream')
+  },
+  makeErrorLogStream(): EventSource {
+    return new EventSource('/logs/error/stream')
+  },
+  // Backward-compat alias (defaults to access logs)
   makeLogStream(): EventSource {
-    return new EventSource('/logs/stream')
+    return this.makeAccessLogStream()
   }
 }
 

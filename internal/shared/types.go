@@ -11,7 +11,7 @@ type HandshakeConfig struct {
     ServerName string `json:"serverName"`
     PublicKey  string `json:"publicKey"`
     ShortID    string `json:"shortId"`
-    Encryption string `json:"encryption"` // none|pq|x25519
+    Encryption string `json:"encryption"` // allowed: "none" or "mlkem768x25519plus.*" (PQ advanced). "pq" is rejected.
     Flow       string `json:"flow"`       // xtls-rprx-vision
 }
 
@@ -72,4 +72,3 @@ func (c *ConnectionParams) Clone() (*ConnectionParams, error) {
     }
     return &out, nil
 }
-

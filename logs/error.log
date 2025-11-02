@@ -1,0 +1,8 @@
+2025/11/02 06:09:24.277190 [Warning] [1036811379] app/dispatcher: non existing outTag: r-outbound-1
+2025/11/02 06:09:24.385983 [Warning] [1623044862] app/dispatcher: non existing outTag: r-outbound-1
+2025/11/02 06:09:24.545540 [Warning] [3832972333] app/dispatcher: non existing outTag: r-outbound-1
+2025/11/02 06:09:25.688962 [Warning] [1467786890] app/dispatcher: non existing outTag: r-outbound-1
+2025/11/02 06:09:25.690113 [Warning] [3767507453] app/dispatcher: non existing outTag: r-outbound-1
+2025/11/02 06:09:42.799817 [Warning] core: Xray 25.10.15 started
+2025/11/02 06:09:54.798877 [Warning] core: Xray 25.10.15 started
+2025/11/02 06:09:58.513688 [Warning] core: Xray 25.10.15 started

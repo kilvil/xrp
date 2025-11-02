@@ -1,0 +1,143 @@
+{
+  "api": {
+    "services": [
+      "HandlerService",
+      "LoggerService",
+      "StatsService"
+    ],
+    "tag": "api"
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": 43085,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1",
+        "port": 1
+      },
+      "tag": "api"
+    }
+  ],
+  "log": {
+    "access": "logs/access.log",
+    "error": "logs/error.log",
+    "loglevel": "warning"
+  },
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "default"
+    },
+    {
+      "protocol": "freedom",
+      "settings": {
+        "redirect": "127.0.0.1:80"
+      },
+      "tag": "local-web-0"
+    },
+    {
+      "mux": {
+        "enabled": false
+      },
+      "protocol": "vless",
+      "settings": {
+        "address": "127.0.0.1",
+        "encryption": "none",
+        "flow": "xtls-rprx-vision",
+        "id": "45da0823-05bb-43aa-855d-783ae9bce7a6",
+        "port": 9443,
+        "reverse": {
+          "tag": "r-inbound-0"
+        }
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "4-WSNJhJCHbLQMOgPSRiHRzCPNq_ee3Ew2gKTKoW4hs",
+          "serverName": "www.fandom.com",
+          "shortId": "1b641055e10e2e48",
+          "spiderX": "/"
+        },
+        "security": "reality"
+      },
+      "tag": "rev-link-0"
+    },
+    {
+      "protocol": "freedom",
+      "settings": {
+        "redirect": "127.0.0.1:81"
+      },
+      "tag": "local-web-1"
+    },
+    {
+      "mux": {
+        "enabled": false
+      },
+      "protocol": "vless",
+      "settings": {
+        "address": "127.0.0.1",
+        "encryption": "none",
+        "flow": "xtls-rprx-vision",
+        "id": "bae105d2-633a-47b6-85b6-db99b76740d2",
+        "port": 9443,
+        "reverse": {
+          "tag": "r-inbound-1"
+        }
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "4-WSNJhJCHbLQMOgPSRiHRzCPNq_ee3Ew2gKTKoW4hs",
+          "serverName": "www.fandom.com",
+          "shortId": "1b641055e10e2e48",
+          "spiderX": "/"
+        },
+        "security": "reality"
+      },
+      "tag": "rev-link-1"
+    }
+  ],
+  "policy": {
+    "levels": {
+      "0": {
+        "statsUserDownlink": true,
+        "statsUserUplink": true
+      }
+    },
+    "system": {
+      "statsInboundDownlink": true,
+      "statsInboundUplink": true,
+      "statsOutboundDownlink": true,
+      "statsOutboundUplink": true
+    }
+  },
+  "routing": {
+    "rules": [
+      {
+        "inboundTag": [
+          "api"
+        ],
+        "outboundTag": "api",
+        "ruleTag": "api"
+      },
+      {
+        "inboundTag": [
+          "r-inbound-0"
+        ],
+        "outboundTag": "local-web-0",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "r-inbound-1"
+        ],
+        "outboundTag": "local-web-1",
+        "type": "field"
+      }
+    ]
+  },
+  "stats": {}
+}

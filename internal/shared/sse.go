@@ -31,6 +31,24 @@ func (h *SSEHub) Broadcast(msg string) {
     }
 }
 
+// Subscribe returns a channel that receives future broadcasts and an unsubscribe func.
+// The channel is buffered and must be drained reasonably fast by the caller.
+func (h *SSEHub) Subscribe() (ch chan string, unsubscribe func()) {
+    ch = make(chan string, 128)
+    h.mu.Lock()
+    h.conns[ch] = struct{}{}
+    h.mu.Unlock()
+    unsubscribe = func() {
+        h.mu.Lock()
+        if _, ok := h.conns[ch]; ok {
+            delete(h.conns, ch)
+            close(ch)
+        }
+        h.mu.Unlock()
+    }
+    return ch, unsubscribe
+}
+
 // ServeHTTP handles /logs/stream style endpoints
 func (h *SSEHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "text/event-stream")
@@ -92,4 +110,3 @@ func (h *SSEHub) Stream(ctx context.Context, msg string) {
     case <-done:
     }
 }
-
