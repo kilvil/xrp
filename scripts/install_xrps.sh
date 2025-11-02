@@ -21,6 +21,7 @@ Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/xrps -addr :8080
+Environment=XRPS_STATE_DIR=/var/lib/xrps
 Restart=on-failure
 RestartSec=2
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -36,4 +37,3 @@ systemctl enable --now xrps
 systemctl status --no-pager -l xrps || true
 
 echo "XRPS installed. Listening on :8080"
-

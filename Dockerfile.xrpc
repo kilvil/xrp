@@ -19,11 +19,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # --- Runtime stage ---
 FROM alpine:3.20
 RUN addgroup -S app && adduser -S -G app app \
-    && mkdir -p /app /logs /home/app \
+    && mkdir -p /app /logs /home/app /home/app/xrpc \
     && chown -R app:app /app /logs /home/app
 
 ENV HOME=/home/app \
-    XRPC_LOG_DIR=/logs
+    XRPC_LOG_DIR=/logs \
+    XRPC_STATE_DIR=/home/app/xrpc
 
 WORKDIR /app
 COPY --from=builder /out/xrpc /usr/local/bin/xrpc
@@ -33,4 +34,3 @@ EXPOSE 8081
 USER app
 ENTRYPOINT ["/usr/local/bin/xrpc"]
 CMD ["-addr", ":8081"]
-

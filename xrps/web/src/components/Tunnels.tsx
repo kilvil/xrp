@@ -6,6 +6,7 @@ import { Textarea } from './ui/textarea'
 import { Label } from './ui/label'
 import { Card, CardTitle } from './ui/card'
 import { Dialog, DialogBody, DialogClose, DialogContent, DialogHeader, DialogTitle } from './ui/dialog'
+import { copyText } from '../lib/utils'
 // Checkbox removed as forward proxy feature is removed
 
 export default function Tunnels() {
@@ -51,7 +52,7 @@ export default function Tunnels() {
     <div className="grid gap-4 md:grid-cols-2">
       <div className="space-y-4">
         <Card>
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between pb-2">
             <CardTitle className="m-0">隧道列表 {loading && '…'}</CardTitle>
             <Button onClick={() => setShowCreate(true)}>新建隧道</Button>
           </div>
@@ -104,7 +105,7 @@ export default function Tunnels() {
                     <span className="inline-flex items-center rounded border border-slate-300 bg-slate-50 px-2 py-0.5 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">none</span>
                   )}
                   {selected.handshake.encryption && (
-                    <Button variant="ghost" onClick={() => navigator.clipboard.writeText(selected.handshake.encryption)}>复制</Button>
+                    <Button variant="ghost" onClick={() => copyText(selected.handshake.encryption)}>复制</Button>
                   )}
                 </div>
               </div>
@@ -138,7 +139,7 @@ export default function Tunnels() {
                             <div className="flex items-center gap-2">
                               <div className="text-xs font-medium">Base64</div>
                               <div className="flex-1 truncate font-mono text-xs text-slate-600 dark:text-slate-300">{paramsByTunnel[selected.id].base64}</div>
-                              <Button variant="ghost" onClick={() => navigator.clipboard.writeText(paramsByTunnel[selected.id].base64)}>复制</Button>
+                              <Button variant="ghost" onClick={() => copyText(paramsByTunnel[selected.id].base64)}>复制</Button>
                             </div>
                             {entryJsonOpen[e.id] && (
                               <Textarea className="h-28 font-mono" value={paramsByTunnel[selected.id].json} readOnly />
@@ -282,8 +283,8 @@ function TunnelForm({ onCreated }: { onCreated: (t: Tunnel) => void }) {
                 <span className="inline-flex items-center rounded border border-indigo-300 bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700 dark:border-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-300">
                   {genPair?.encryption ? (pqAlgo === 'pq' ? '已生成 · ML-KEM-768' : '已生成 · X25519') : (customEnc ? '已设置自定义值' : '未生成')}
                 </span>
-                {genPair?.decryption && <Button className="whitespace-nowrap" type="button" variant="ghost" onClick={() => navigator.clipboard.writeText(genPair.decryption)}>复制 decryption</Button>}
-                {(genPair?.encryption || customEnc) && <Button className="whitespace-nowrap" type="button" variant="ghost" onClick={() => navigator.clipboard.writeText(genPair?.encryption || customEnc)}>复制 encryption</Button>}
+                {genPair?.decryption && <Button className="whitespace-nowrap" type="button" variant="ghost" onClick={() => copyText(genPair.decryption)}>复制 decryption</Button>}
+                {(genPair?.encryption || customEnc) && <Button className="whitespace-nowrap" type="button" variant="ghost" onClick={() => copyText(genPair?.encryption || customEnc)}>复制 encryption</Button>}
                 <Button className="whitespace-nowrap" type="button" variant="ghost" onClick={() => setShowEncAdv(v => !v)}>{showEncAdv ? '收起详情' : '展开详情'}</Button>
               </div>
               {showEncAdv && (
@@ -307,12 +308,12 @@ function TunnelForm({ onCreated }: { onCreated: (t: Tunnel) => void }) {
                       <div>
                         <div className="text-xs font-medium mb-1">decryption（服务端入站）</div>
                         <Textarea className="h-16 font-mono" value={genPair.decryption} readOnly />
-                        <div className="mt-1"><Button type="button" variant="ghost" onClick={() => navigator.clipboard.writeText(genPair.decryption)}>复制</Button></div>
+                        <div className="mt-1"><Button type="button" variant="ghost" onClick={() => copyText(genPair.decryption)}>复制</Button></div>
                       </div>
                       <div>
                         <div className="text-xs font-medium mb-1">encryption（客户端出站/XRPC）</div>
                         <Textarea className="h-16 font-mono" value={genPair.encryption} readOnly />
-                        <div className="mt-1"><Button type="button" variant="ghost" onClick={() => navigator.clipboard.writeText(genPair.encryption)}>复制</Button></div>
+                        <div className="mt-1"><Button type="button" variant="ghost" onClick={() => copyText(genPair.encryption)}>复制</Button></div>
                       </div>
                     </div>
                   )}

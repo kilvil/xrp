@@ -10,6 +10,7 @@ export default function Tunnels() {
   const [showAdd, setShowAdd] = React.useState(false)
   const [base64, setBase64] = React.useState('')
   const [msg, setMsg] = React.useState('')
+  const [portalAddr, setPortalAddr] = React.useState<string>(typeof window !== 'undefined' ? window.location.hostname : '')
   const load = React.useCallback(async () => {
     setLoading(true)
     try {
@@ -26,6 +27,13 @@ export default function Tunnels() {
     }
   }, [])
   React.useEffect(() => { load() }, [load])
+  React.useEffect(() => {
+    // Load active profile once to get portal address
+    API.activeProfile().then((res: any) => {
+      const host = res?.params?.portal_addr
+      if (host && typeof host === 'string') setPortalAddr(host)
+    }).catch(() => {})
+  }, [])
 
   const onDelete = async (id: string) => {
     await API.deleteTunnel(id)
@@ -72,13 +80,13 @@ export default function Tunnels() {
                 入口：
                 {it.entry_port > 0 ? (
                   <a
-                    href={`//${window.location.hostname}:${it.entry_port}`}
+                    href={`//${portalAddr}:${it.entry_port}`}
                     target="_blank"
                     rel="noreferrer"
                     className="underline font-mono text-indigo-600 hover:text-indigo-500 inline-block"
                     title="打开隧道入口"
                   >
-                    {window.location.hostname}:{it.entry_port}
+                    {portalAddr}:{it.entry_port}
                   </a>
                 ) : (
                   <span>-</span>

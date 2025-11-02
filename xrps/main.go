@@ -771,11 +771,18 @@ func randomBase64URL(n int) string {
     return base64.RawURLEncoding.EncodeToString(b)
 }
 
-// initAuth loads or creates admin credentials in ~/xrps/admin.auth.json
+// getStateDir returns the directory to store XRPS state (auth, etc.).
+// Order: XRPS_STATE_DIR env -> /var/lib/xrps
+func getStateDir() string {
+    if v := strings.TrimSpace(os.Getenv("XRPS_STATE_DIR")); v != "" {
+        return v
+    }
+    return "/var/lib/xrps"
+}
+
+// initAuth loads or creates admin credentials in getStateDir()/admin.auth.json
 func (s *Server) initAuth() error {
-    home, err := os.UserHomeDir()
-    if err != nil { return err }
-    dir := filepath.Join(home, "xrps")
+    dir := getStateDir()
     if err := os.MkdirAll(dir, 0o755); err != nil { return err }
     path := filepath.Join(dir, "admin.auth.json")
     s.authPath = path
@@ -1164,7 +1171,15 @@ func main() {
     s.logStartupSummary()
     // init admin auth
     if err := s.initAuth(); err != nil {
-        log.Printf("auth init failed: %v", err)
+        log.Printf("auth init failed: %v; falling back to in-memory credentials", err)
+        user := "admin"
+        salt := randomHex(16)
+        pass := randomBase64URL(24)
+        h := hashPassword(salt, pass)
+        s.authUser, s.authSalt, s.authHash = user, salt, h
+        log.Printf("==== XRPS 内存凭据已启用（未持久化） ====")
+        log.Printf("用户名: admin  初始密码: %s", pass)
+        log.Printf("提示: 设置 XRPS_STATE_DIR 或确保 HOME 可用以持久化凭据")
     }
     // Attempt to start (placeholder) core; log success/failure to console
     if err := s.startCore(); err != nil {

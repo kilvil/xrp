@@ -12,13 +12,14 @@ services:
       # 可选：静态资源目录（若你用前端构建产物挂载到容器）
       # - XRPS_UI_DIR=/ui
       - XRPS_LOG_DIR=/logs
+      - XRPS_STATE_DIR=/home/app/xrps
       - HOME=/home/app
       # 可选：自定义 Xray 资产目录（geo* 文件）
       # - XRAY_LOCATION_ASSET=/assets
       # 可选：使用外部调试配置替代内置生成
       # - XRAY_CFG_PORTAL=/home/app/xrp/xray.portal.json
     volumes:
-      # 持久化 HOME：用于保存 ~/xrps/admin.auth.json 与 ~/xrp/xray.portal.json
+      # 持久化 XRPS 状态与配置：/home/app/xrps 与 ~/xrp/xray.portal.json
       - xrps-data:/home/app
       # 可选：持久化日志
       - xrps-logs:/logs
@@ -40,13 +41,14 @@ services:
     restart: unless-stopped
     environment:
       - XRPC_LOG_DIR=/logs
+      - XRPC_STATE_DIR=/home/app/xrpc
       - HOME=/home/app
       # 可选：自定义 Xray 资产目录（geo* 文件）
       # - XRAY_LOCATION_ASSET=/assets
       # 可选：使用外部调试配置替代内置生成
       # - XRAY_CFG_BRIDGE=/home/app/xrp/xray.bridge.json
     volumes:
-      # 持久化 HOME：用于保存 ~/xrpc/admin.auth.json 与 ~/xrp/xray.bridge.json
+      # 持久化 XRPC 状态与配置：/home/app/xrpc 与 ~/xrp/xray.bridge.json
       - xrpc-data:/home/app
       - xrpc-logs:/logs
       # 可选：挂载静态 UI 目录
@@ -59,4 +61,3 @@ volumes:
   xrpc-data: {}
   xrps-logs: {}
   xrpc-logs: {}
-

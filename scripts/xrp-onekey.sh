@@ -159,6 +159,7 @@ latest_tag() {
 
 download_and_install() {
   local name="$1"
+  _SYSTEMD_SETUP=0
   local arch tag asset url tmpdir tmpfile
   arch=$(detect_arch)
   tag=$(latest_tag)
@@ -240,6 +241,7 @@ Wants=network-online.target
 
 [Service]
 ExecStart=${INSTALL_DIR}/${name} ${svc_port:+-addr :$svc_port}
+Environment=${name^^}_STATE_DIR=/var/lib/${name}
 Restart=on-failure
 RestartSec=2
 AmbientCapabilities=CAP_NET_BIND_SERVICE

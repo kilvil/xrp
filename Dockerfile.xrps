@@ -22,11 +22,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # --- Runtime stage ---
 FROM alpine:3.20
 RUN addgroup -S app && adduser -S -G app app \
-    && mkdir -p /app /logs /home/app \
+    && mkdir -p /app /logs /home/app /home/app/xrps \
     && chown -R app:app /app /logs /home/app
 
 ENV HOME=/home/app \
-    XRPS_LOG_DIR=/logs
+    XRPS_LOG_DIR=/logs \
+    XRPS_STATE_DIR=/home/app/xrps
 
 WORKDIR /app
 COPY --from=builder /out/xrps /usr/local/bin/xrps
@@ -37,4 +38,3 @@ EXPOSE 8080
 USER app
 ENTRYPOINT ["/usr/local/bin/xrps"]
 CMD ["-addr", ":8080"]
-

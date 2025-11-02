@@ -21,6 +21,7 @@ Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/xrpc -addr :8081
+Environment=XRPC_STATE_DIR=/var/lib/xrpc
 Restart=on-failure
 RestartSec=2
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -36,4 +37,3 @@ systemctl enable --now xrpc
 systemctl status --no-pager -l xrpc || true
 
 echo "XRPC installed. Listening on :8081"
-
