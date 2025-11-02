@@ -44,8 +44,8 @@ type Tunnel struct {
 
 // In-memory store (v1)
 type Store struct {
-	mu      sync.RWMutex
-	tunnels map[string]*Tunnel
+    mu      sync.RWMutex
+    tunnels map[string]*Tunnel
 }
 
 func NewStore() *Store { return &Store{tunnels: map[string]*Tunnel{}} }
@@ -105,9 +105,9 @@ type connectionParamsResp struct {
 }
 
 type Server struct {
-	addr       string
-	store      *Store
-	logs       *shared.SSEHub
+    addr       string
+    store      *Store
+    logs       *shared.SSEHub
 	access     *shared.SSEHub
 	errors     *shared.SSEHub
 	uiFS       http.FileSystem
@@ -129,8 +129,10 @@ type Server struct {
 	statsTotal    []statsPoint
 	statsPerEntry map[string][]statsPoint
 	statsStop     chan struct{}
-	// WS stats hub
-	wsStats *shared.WSHub
+    // WS stats hub
+    wsStats *shared.WSHub
+    // persistence
+    tunnelsPath string
 }
 
 type statsPoint struct {
@@ -379,7 +381,7 @@ func sanitizeVLESSDecryption(s string) string {
 }
 
 func (s *Server) routes() http.Handler {
-	mux := http.NewServeMux()
+    mux := http.NewServeMux()
 
 	// health
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
@@ -620,13 +622,17 @@ func (s *Server) routes() http.Handler {
 				http.Error(w, err.Error(), 400)
 				return
 			}
-			s.store.Add(t)
-			// restart core to apply updated portal config (best-effort)
-			if err := s.restartCore(); err != nil {
-				log.Printf("restart after tunnel create failed: %v", err)
-			}
-			s.logs.Broadcast(fmt.Sprintf("{\"event\":\"tunnel_created\",\"id\":\"%s\",\"ts\":%d}", id, time.Now().Unix()))
-			writeJSON(w, t)
+            s.store.Add(t)
+            // persist tunnels to disk
+            if err := s.saveTunnels(); err != nil {
+                log.Printf("persist tunnels failed: %v", err)
+            }
+            // restart core to apply updated portal config (best-effort)
+            if err := s.restartCore(); err != nil {
+                log.Printf("restart after tunnel create failed: %v", err)
+            }
+            s.logs.Broadcast(fmt.Sprintf("{\"event\":\"tunnel_created\",\"id\":\"%s\",\"ts\":%d}", id, time.Now().Unix()))
+            writeJSON(w, t)
 		default:
 			http.Error(w, "method not allowed", 405)
 		}
@@ -651,11 +657,12 @@ func (s *Server) routes() http.Handler {
 			case http.MethodGet:
 				writeJSON(w, t)
 				return
-			case http.MethodDelete:
-				if s.store.Delete(id) {
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
+            case http.MethodDelete:
+                if s.store.Delete(id) {
+                    _ = s.saveTunnels()
+                    w.WriteHeader(http.StatusNoContent)
+                    return
+                }
 				http.Error(w, "not found", 404)
 				return
 			case http.MethodPatch:
@@ -737,12 +744,15 @@ func (s *Server) routes() http.Handler {
 					http.Error(w, err.Error(), 400)
 					return
 				}
-				t.UpdatedAt = time.Now()
-				if err := s.restartCore(); err != nil {
-					log.Printf("restart after tunnel patch failed: %v", err)
-				}
-				writeJSON(w, t)
-				return
+                t.UpdatedAt = time.Now()
+                if err := s.saveTunnels(); err != nil {
+                    log.Printf("persist tunnels failed: %v", err)
+                }
+                if err := s.restartCore(); err != nil {
+                    log.Printf("restart after tunnel patch failed: %v", err)
+                }
+                writeJSON(w, t)
+                return
 			default:
 				http.Error(w, "method not allowed", 405)
 				return
@@ -790,7 +800,98 @@ func (s *Server) routes() http.Handler {
 		fmt.Fprintf(w, "<!doctype html><title>XRPS</title><h1>XRPS running</h1><p>APIs: /healthz, /api/tunnels, /logs/stream, /api/logs?type=access|error&tail=N, /logs/access/stream, /logs/error/stream</p>")
 	})
 
-	return withCORS(s.secure(mux))
+    return withCORS(s.secure(mux))
+}
+
+// disk model for persistence (includes private fields excluded from API)
+type diskTunnel struct {
+    ID        string                 `json:"id"`
+    Name      string                 `json:"name"`
+    Portal    string                 `json:"portal_addr"`
+    Handshake shared.HandshakeConfig `json:"handshake"`
+    Entries   []shared.TunnelEntry   `json:"entries"`
+    PrivKey   string                 `json:"private_key"`
+    VLESSDec  string                 `json:"decryption"`
+    CreatedAt time.Time              `json:"createdAt"`
+    UpdatedAt time.Time              `json:"updatedAt"`
+}
+
+func (s *Server) tunnelsFile() string {
+    if s.tunnelsPath != "" {
+        return s.tunnelsPath
+    }
+    dir := getStateDir()
+    _ = os.MkdirAll(dir, 0o755)
+    s.tunnelsPath = filepath.Join(dir, "tunnels.json")
+    return s.tunnelsPath
+}
+
+func (s *Server) saveTunnels() error {
+    s.store.mu.RLock()
+    list := make([]*Tunnel, 0, len(s.store.tunnels))
+    for _, t := range s.store.tunnels {
+        list = append(list, t)
+    }
+    s.store.mu.RUnlock()
+    dlist := make([]diskTunnel, 0, len(list))
+    for _, t := range list {
+        dlist = append(dlist, diskTunnel{
+            ID:        t.ID,
+            Name:      t.Name,
+            Portal:    t.Portal,
+            Handshake: t.Handshake,
+            Entries:   append([]shared.TunnelEntry(nil), t.Entries...),
+            PrivKey:   t.PrivKey,
+            VLESSDec:  t.VLESSDec,
+            CreatedAt: t.CreatedAt,
+            UpdatedAt: t.UpdatedAt,
+        })
+    }
+    b, err := json.MarshalIndent(dlist, "", "  ")
+    if err != nil {
+        return err
+    }
+    path := s.tunnelsFile()
+    tmp := path + ".tmp"
+    if err := os.WriteFile(tmp, b, 0o600); err != nil {
+        return err
+    }
+    return os.Rename(tmp, path)
+}
+
+func (s *Server) loadTunnels() error {
+    path := s.tunnelsFile()
+    b, err := os.ReadFile(path)
+    if err != nil {
+        if os.IsNotExist(err) {
+            return nil
+        }
+        return err
+    }
+    var dlist []diskTunnel
+    if err := json.Unmarshal(b, &dlist); err != nil {
+        return err
+    }
+    for _, dt := range dlist {
+        t := &Tunnel{
+            ID:        dt.ID,
+            Name:      dt.Name,
+            Portal:    dt.Portal,
+            Handshake: dt.Handshake,
+            Entries:   dt.Entries,
+            PrivKey:   dt.PrivKey,
+            VLESSDec:  dt.VLESSDec,
+            CreatedAt: dt.CreatedAt,
+            UpdatedAt: dt.UpdatedAt,
+        }
+        // Validate loaded tunnel; skip invalid entries
+        if err := s.validateTunnelConfig(t); err != nil {
+            log.Printf("skip invalid tunnel %s: %v", t.ID, err)
+            continue
+        }
+        s.store.Add(t)
+    }
+    return nil
 }
 
 // handleLogStream streams the full file from the beginning, then follows new lines via SSEHub.
@@ -1066,7 +1167,7 @@ func (s *Server) startCore() error {
 	if cfgPath == "" {
 		cfgPath = filepath.Join(runDir, "xray.portal.json")
 	}
-	// Build portal config from current tunnels; on failure, try to reuse existing config file
+    // Build portal config from current tunnels; on failure, try to reuse existing config file
 	cfg, err := s.buildPortalConfig()
 	if err != nil {
 		// If there is an existing config file, reuse it
@@ -1486,6 +1587,10 @@ func main() {
 		log.Printf("==== XRPS 内存凭据已启用（未持久化） ====")
 		log.Printf("用户名: admin  初始密码: %s", pass)
 		log.Printf("提示: 设置 XRPS_STATE_DIR 以持久化凭据，或在具备写权限的环境中执行 'xrps -reset-admin'")
+	}
+	// load persisted tunnels (if any) so the panel shows existing ones after restart
+	if err := s.loadTunnels(); err != nil {
+		log.Printf("load tunnels failed: %v", err)
 	}
 	// Attempt to start (placeholder) core; log success/failure to console
 	if err := s.startCore(); err != nil {

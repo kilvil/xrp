@@ -50,9 +50,12 @@ Encryption policy
   
 
 Run directories and ports
-- XRPS writes its effective config to `~/xrp/xray.portal.json`. On startup, if there are no tunnels loaded and this file exists, XRPS will reuse it instead of generating a minimal config. You can still override with `XRAY_CFG_PORTAL`.
-- XRPC writes its effective config to `~/xrp/xray.bridge.json`. On startup, if no profile is applied and this file exists, XRPC will reuse it instead of generating a minimal config. You can still override with `XRAY_CFG_BRIDGE`.
-- Admin auth storage:
+ - XRPS writes its effective config to `~/xrp/xray.portal.json`. On startup, if there are no tunnels loaded and this file exists, XRPS will reuse it instead of generating a minimal config. You can still override with `XRAY_CFG_PORTAL`.
+ - XRPC writes its effective config to `~/xrp/xray.bridge.json`. On startup, if no profile is applied and this file exists, XRPC will reuse it instead of generating a minimal config. You can still override with `XRAY_CFG_BRIDGE`.
+ - Runtime persistence（面板数据持久化）:
+   - XRPS：隧道列表会保存到 `/var/lib/xrps/tunnels.json`（可通过 `XRPS_STATE_DIR` 自定义目录）。服务启动时会自动读取到内存，所以重启后面板仍能显示之前已创建的隧道。
+   - XRPC：最近一次应用的 Profile 会保存到 `/var/lib/xrpc/profile.json`，每个隧道的本地状态（Map 端口、Target、Active）会保存到 `/var/lib/xrpc/tunnel_states.json`（可通过 `XRPC_STATE_DIR` 自定义目录）。服务启动时会自动加载并回填到面板。
+ - Admin auth storage:
   - XRPS: 默认 `/var/lib/xrps/admin.auth.json`，可通过 `XRPS_STATE_DIR` 自定义。
   - XRPC: 默认 `/var/lib/xrpc/admin.auth.json`，可通过 `XRPC_STATE_DIR` 自定义。
   - 首次启动会生成 admin/随机密码并写入上述路径，同时将密码打印到日志。

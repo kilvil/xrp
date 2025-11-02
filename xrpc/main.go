@@ -322,7 +322,10 @@ type Server struct {
 	statsMu        sync.Mutex
 	statsTotal     []statsPoint
 	statsPerTunnel map[string][]statsPoint
-	wsStats        *shared.WSHub
+    wsStats        *shared.WSHub
+    // persistence paths
+    profilePath string
+    statesPath  string
 }
 
 type statsPoint struct {
@@ -574,10 +577,17 @@ func (s *Server) routes() http.Handler {
 		if err := s.restartCore(); err != nil {
 			log.Printf("restart after profile apply failed: %v", err)
 		}
-		// reset monitors (stats/error)
-		s.restartMonitors()
-		s.logs.Broadcast(fmt.Sprintf("{\"event\":\"profile_applied\",\"ts\":%d}", time.Now().Unix()))
-		writeJSON(w, map[string]any{"ok": true})
+        // reset monitors (stats/error)
+        s.restartMonitors()
+        // persist profile and current states
+        if err := s.saveProfile(p); err != nil {
+            log.Printf("persist profile failed: %v", err)
+        }
+        if err := s.saveTunnelStates(); err != nil {
+            log.Printf("persist tunnel states failed: %v", err)
+        }
+        s.logs.Broadcast(fmt.Sprintf("{\"event\":\"profile_applied\",\"ts\":%d}", time.Now().Unix()))
+        writeJSON(w, map[string]any{"ok": true})
 	})
 
 	mux.HandleFunc("/api/profile/active", func(w http.ResponseWriter, r *http.Request) {
@@ -665,31 +675,40 @@ func (s *Server) routes() http.Handler {
 				return
 			}
 			http.NotFound(w, r)
-		case http.MethodPatch:
-			var body struct {
-				MapPort *int    `json:"map_port"`
-				Active  *bool   `json:"active"`
-				Target  *string `json:"target"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				http.Error(w, err.Error(), 400)
-				return
-			}
-			if st, ok := s.conn.patchTunnel(id, body.MapPort, body.Active, body.Target); ok {
-				writeJSON(w, st)
-				return
-			}
-			http.NotFound(w, r)
-		case http.MethodDelete:
-			if s.conn.deleteTunnel(id) {
-				// apply change to embedded core so it is removed from effective config
-				if err := s.restartCore(); err != nil {
-					http.Error(w, "core restart failed: "+err.Error(), 500)
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
+        case http.MethodPatch:
+            var body struct {
+                MapPort *int    `json:"map_port"`
+                Active  *bool   `json:"active"`
+                Target  *string `json:"target"`
+            }
+            if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+                http.Error(w, err.Error(), 400)
+                return
+            }
+            if st, ok := s.conn.patchTunnel(id, body.MapPort, body.Active, body.Target); ok {
+                _ = s.saveTunnelStates()
+                writeJSON(w, st)
+                return
+            }
+            http.NotFound(w, r)
+        case http.MethodDelete:
+            if s.conn.deleteTunnel(id) {
+                // apply change to embedded core so it is removed from effective config
+                if err := s.restartCore(); err != nil {
+                    http.Error(w, "core restart failed: "+err.Error(), 500)
+                    return
+                }
+                // persist updated profile + states
+                s.conn.mu.RLock()
+                cur := s.conn.params
+                s.conn.mu.RUnlock()
+                if cur != nil {
+                    _ = s.saveProfile(cur)
+                }
+                _ = s.saveTunnelStates()
+                w.WriteHeader(http.StatusNoContent)
+                return
+            }
 			http.NotFound(w, r)
 		default:
 			http.Error(w, "method not allowed", 405)
@@ -762,13 +781,102 @@ func (s *Server) handleLogStream(which string) http.HandlerFunc {
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(v)
+    w.Header().Set("Content-Type", "application/json")
+    enc := json.NewEncoder(w)
+    enc.SetIndent("", "  ")
+    _ = enc.Encode(v)
 }
 
 func stringsTrim(s string) string { return strings.TrimSpace(strings.Trim(s, "\n\r\t")) }
+
+// === Persistence (profile + tunnel states) ===
+func (s *Server) profileFile() string {
+    if s.profilePath != "" {
+        return s.profilePath
+    }
+    dir := getStateDir()
+    _ = os.MkdirAll(dir, 0o755)
+    s.profilePath = filepath.Join(dir, "profile.json")
+    return s.profilePath
+}
+
+func (s *Server) statesFile() string {
+    if s.statesPath != "" {
+        return s.statesPath
+    }
+    dir := getStateDir()
+    _ = os.MkdirAll(dir, 0o755)
+    s.statesPath = filepath.Join(dir, "tunnel_states.json")
+    return s.statesPath
+}
+
+func (s *Server) saveProfile(p *shared.ConnectionParams) error {
+    b, err := json.MarshalIndent(p, "", "  ")
+    if err != nil {
+        return err
+    }
+    path := s.profileFile()
+    tmp := path + ".tmp"
+    if err := os.WriteFile(tmp, b, 0o600); err != nil {
+        return err
+    }
+    return os.Rename(tmp, path)
+}
+
+func (s *Server) saveTunnelStates() error {
+    s.conn.mu.RLock()
+    arr := make([]TunnelState, 0, len(s.conn.tunnelStates))
+    for _, st := range s.conn.tunnelStates {
+        arr = append(arr, *st)
+    }
+    s.conn.mu.RUnlock()
+    b, err := json.MarshalIndent(arr, "", "  ")
+    if err != nil {
+        return err
+    }
+    path := s.statesFile()
+    tmp := path + ".tmp"
+    if err := os.WriteFile(tmp, b, 0o600); err != nil {
+        return err
+    }
+    return os.Rename(tmp, path)
+}
+
+func (s *Server) loadPersisted() {
+    // Load profile
+    if pb, err := os.ReadFile(s.profileFile()); err == nil {
+        var p shared.ConnectionParams
+        if err := json.Unmarshal(pb, &p); err == nil {
+            if err := p.Validate(); err == nil {
+                if err := s.conn.ApplyParams(&p); err != nil {
+                    log.Printf("apply persisted profile failed: %v", err)
+                }
+            } else {
+                log.Printf("persisted profile invalid: %v", err)
+            }
+        } else {
+            log.Printf("read persisted profile failed: %v", err)
+        }
+    }
+    // Load tunnel states and merge
+    if sb, err := os.ReadFile(s.statesFile()); err == nil {
+        var arr []TunnelState
+        if err := json.Unmarshal(sb, &arr); err == nil {
+            s.conn.mu.Lock()
+            for _, st := range arr {
+                if cur, ok := s.conn.tunnelStates[st.ID]; ok {
+                    cur.MapPort = st.MapPort
+                    cur.Target = st.Target
+                    cur.Active = st.Active
+                    cur.LastChange = time.Now()
+                }
+            }
+            s.conn.mu.Unlock()
+        } else {
+            log.Printf("read persisted states failed: %v", err)
+        }
+    }
+}
 
 // secure wraps handlers with HTTP Basic Auth (admin/<password>), except for /healthz and OPTIONS.
 func (s *Server) secure(next http.Handler) http.Handler {
@@ -1306,6 +1414,8 @@ func main() {
 		log.Printf("用户名: admin  初始密码: %s", pass)
 		log.Printf("提示: 设置 XRPC_STATE_DIR 以持久化凭据，或在具备写权限的环境中执行 'xrpc -reset-admin'")
 	}
+	// Load persisted profile and tunnel states so the panel shows them after restart
+	s.loadPersisted()
 	// Attempt to start core with exponential backoff ensure loop
 	go s.ensureCoreRunning()
 	// start stats/error monitors
