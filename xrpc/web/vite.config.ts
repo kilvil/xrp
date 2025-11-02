@@ -3,6 +3,8 @@ import react from '@vitejs/plugin-react'
 import { fileURLToPath, URL } from 'node:url'
 
 export default defineConfig({
+  // Ensure production assets are referenced under /ui/ when served by Go
+  base: '/ui/',
   plugins: [react()],
   resolve: {
     alias: {

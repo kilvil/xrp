@@ -27,6 +27,7 @@ import (
     "xrp/internal/coreembed"
 )
 
+
 // Tunnel model in XRPS storage
 type Tunnel struct {
     ID        string                 `json:"id"`
@@ -1144,6 +1145,11 @@ func main() {
         if st, err := os.Stat(dir); err == nil && st.IsDir() {
             s.uiFS = http.Dir(dir)
             log.Printf("serving static UI at /ui/ from %s", dir)
+        }
+    } else {
+        if efs := getEmbeddedUI(); efs != nil {
+            s.uiFS = efs
+            log.Printf("serving embedded UI at /ui/")
         }
     }
 

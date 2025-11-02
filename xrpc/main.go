@@ -22,9 +22,10 @@ import (
     "sync"
     "time"
 
-    "xrp/internal/shared"
     "xrp/internal/coreembed"
+    "xrp/internal/shared"
 )
+
 
 type Connector struct {
 	mu           sync.RWMutex
@@ -471,9 +472,9 @@ func (s *Server) routes() http.Handler {
     })
     // removed: /api/reality/mldsa65 (unused feature)
 
-	if s.uiFS != nil {
-		mux.Handle("/ui/", http.StripPrefix("/ui/", http.FileServer(s.uiFS)))
-	}
+    if s.uiFS != nil {
+        mux.Handle("/ui/", http.StripPrefix("/ui/", http.FileServer(s.uiFS)))
+    }
 
 	mux.HandleFunc("/api/profile/apply", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1142,12 +1143,17 @@ func main() {
             }
         }
     }()
-	if dir := os.Getenv("XRPC_UI_DIR"); dir != "" {
-		if st, err := os.Stat(dir); err == nil && st.IsDir() {
-			s.uiFS = http.Dir(dir)
-			log.Printf("serving static UI at /ui/ from %s", dir)
-		}
-	}
+if dir := os.Getenv("XRPC_UI_DIR"); dir != "" {
+    if st, err := os.Stat(dir); err == nil && st.IsDir() {
+        s.uiFS = http.Dir(dir)
+        log.Printf("serving static UI at /ui/ from %s", dir)
+    }
+} else {
+    if efs := getEmbeddedUI(); efs != nil {
+        s.uiFS = efs
+        log.Printf("serving embedded UI at /ui/")
+    }
+}
 
 	s.logStartupSummary()
     // init admin auth
