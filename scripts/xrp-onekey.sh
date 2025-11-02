@@ -13,6 +13,9 @@ GH_DOWNLOAD_BASE="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/downloa
 
 # internal state
 _SYSTEMD_SETUP=0
+RESET_PASS=""
+RESET_FILE=""
+RESET_OUTPUT=""
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -81,6 +84,40 @@ try_grab_pass_from_journal() {
   journalctl -u "$svc" --since "-10 minutes" -o cat 2>/dev/null | parse_pass_from_lines || return 1
 }
 
+reset_admin_credentials() {
+  local name="$1"
+  local cmd="${INSTALL_DIR}/${name}"
+  RESET_PASS=""
+  RESET_FILE=""
+  RESET_OUTPUT=""
+  if [[ ! -x "$cmd" ]]; then
+    echo "Binary not found: $cmd" >&2
+    return 1
+  fi
+  local out status
+  set +e
+  out=$("$cmd" -reset-admin 2>&1)
+  status=$?
+  set -e
+  if [[ $status -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+    set +e
+    out=$(sudo "$cmd" -reset-admin 2>&1)
+    status=$?
+    set -e
+  fi
+  if [[ $status -ne 0 ]]; then
+    echo "$out" >&2
+    return $status
+  fi
+  RESET_OUTPUT="$out"
+  RESET_PASS=$(printf '%s\n' "$out" | sed -n 's/^Password:[[:space:]]*//p' | tail -n1)
+  RESET_FILE=$(printf '%s\n' "$out" | sed -n 's/^File:[[:space:]]*//p' | tail -n1)
+  if [[ -z "$RESET_PASS" ]]; then
+    return 1
+  fi
+  return 0
+}
+
 temp_start_and_grab_pass() {
   local name="$1" port="$2"
   local tmpfile
@@ -111,8 +148,32 @@ post_install_info() {
   local port
   port=$(default_port_for "$name")
   print_panel_urls "$name" "$port"
+  echo "配置管理员凭据..."
+  if reset_admin_credentials "$name"; then
+    if [[ "$method" == "systemd" ]] && command -v systemctl >/dev/null 2>&1; then
+      local sp
+      sp=$(sudo_prefix)
+      echo "重启 ${name} 服务以应用新密码..."
+      set +e
+      $sp systemctl restart "$name"
+      local rc=$?
+      set -e
+      if [[ $rc -ne 0 ]]; then
+        echo "警告: 重启 ${name} 服务失败，请手动执行 'systemctl restart ${name}'" >&2
+      fi
+    fi
+    local cred_file="$RESET_FILE"
+    if [[ -z "$cred_file" ]]; then
+      cred_file="/var/lib/${name}/admin.auth.json"
+    fi
+    echo "管理员凭据："
+    echo "  用户名：admin"
+    echo "  初始密码：$RESET_PASS"
+    echo "  凭据文件：$cred_file"
+    return
+  fi
 
-  echo "尝试获取管理员账号密码（首次启动会输出）："
+  echo "自动重置管理员密码失败，尝试读取日志输出..." >&2
   local pass=""
   if [[ "$method" == "systemd" ]]; then
     sleep 2
@@ -125,11 +186,11 @@ post_install_info() {
     esac
   fi
   if [[ -n "$pass" ]]; then
-    echo "- 账号：admin"
-    echo "- 初始密码：$pass"
+    echo "管理员凭据："
+    echo "  用户名：admin"
+    echo "  初始密码：$pass"
   else
-    echo "未捕获到初始密码。可能不是首次启动，或日志不可用。"
-    echo "如为首次启动，可在 'journalctl -u ${name} -o cat' 中查找包含‘初始密码’的日志行。"
+    echo "未捕获到初始密码。可查看 'journalctl -u ${name} -o cat' 或执行 '${INSTALL_DIR}/${name} -reset-admin' 手动重置。"
   fi
 }
 

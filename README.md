@@ -56,6 +56,13 @@ Run directories and ports
   - XRPS: 默认 `/var/lib/xrps/admin.auth.json`，可通过 `XRPS_STATE_DIR` 自定义。
   - XRPC: 默认 `/var/lib/xrpc/admin.auth.json`，可通过 `XRPC_STATE_DIR` 自定义。
   - 首次启动会生成 admin/随机密码并写入上述路径，同时将密码打印到日志。
+
+## 管理员密码
+
+- 重置 XRPS 管理员密码：`xrps -reset-admin`
+- 重置 XRPC 管理员密码：`xrpc -reset-admin`
+- 命令会写入 `/var/lib/xrps` / `/var/lib/xrpc`（或你通过 `*_STATE_DIR` 设置的目录），并在标准输出打印新密码。
+- 若进程已在运行，请在重置后执行 `systemctl restart xrps` / `systemctl restart xrpc` 让新凭据生效。
 Tips
 - In dev, you can simulate log streaming by appending lines to `./logs/access.log` or `./logs/error.log`; the SSE endpoints will push new lines.
 
@@ -139,10 +146,10 @@ Two production-ready images can be built locally with multi-stage Dockerfiles.
   - 默认安装目录为 `/usr/local/bin`，需要写入权限（自动使用 `sudo`）。
   - 脚本会自动解析 GitHub 最新 Release，下载匹配架构的二进制（amd64/arm64）。
   - 安装后可选择是否创建并启动 systemd 服务（可选）。
-  - 脚本会输出面板地址（`/ui/`）并尝试抓取“首次启动”日志中的管理员账号密码（admin/随机密码）。
-    - 使用 systemd 启动时，脚本会从 `journalctl -u xrps|xrpc` 中抓取包含“初始密码”的日志行。
-    - 未用 systemd 时，可选择临时启动一次以生成并显示初始密码。
-    - 非首次启动无法找回旧密码（仅存储哈希）。如需重置，删除默认路径下的 `/var/lib/xrps/admin.auth.json` 或 `/var/lib/xrpc/admin.auth.json`（或你通过 `XRPS_STATE_DIR`/`XRPC_STATE_DIR` 指定的目录）后重新启动。
+  - 脚本会输出面板地址（`/ui/`），并调用 `xrps -reset-admin` / `xrpc -reset-admin` 生成随机管理员密码。
+    - systemd 场景下会自动重启服务以加载新密码。
+    - 命令也会把凭据写入 `/var/lib/xrps` / `/var/lib/xrpc`（或自定义的 `*_STATE_DIR`）。
+    - 非首次启动无法找回旧密码（仅存储哈希）。如需重置，可再次执行上述命令或删除对应目录下的 `admin.auth.json` 后重新启动。
     - 使用 systemd 安装时，服务里注入了 `XRPS_STATE_DIR=/var/lib/xrps` / `XRPC_STATE_DIR=/var/lib/xrpc`，确保无 HOME 时也能持久化鉴权信息。
     - 如需自定义存储目录，可编辑 systemd 单元或在前台运行前导出对应环境变量。
   - 卸载会尝试停止/禁用并移除同名 systemd 服务，然后删除二进制。
