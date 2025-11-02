@@ -3,7 +3,7 @@
 This repo contains two services to manage Xray reverse proxying:
 
 - `xrps` (server/portal): create and manage reverse tunnels; generate Base64 connection params for clients. XRPS only defines how to connect to the server (portal addr, REALITY handshake, entry ports). It does not decide the forwarding destination.
-- `xrpc` (client/bridge): paste Base64 params to connect; shows status, logs and reconnection events. XRPC decides each tunnel’s forwarding target `ip:port` (default `127.0.0.1:mapPort`) and can change it at runtime.
+- `xrpc` (client/bridge): paste Base64 params to connect; shows status, logs and reconnection events. XRPC decides each tunnel’s forwarding target `ip:port` (default `127.0.0.1:80`, or `127.0.0.1:mapPort` when a hint is provided) and can change it at runtime.
 
 Note: xray-core is now embedded in-process by default. Services build an Xray JSON config (REALITY + Reverse v4) and start a core instance internally, writing `./logs/*.log` for access/error and exposing restart endpoints. You can still point to an external config via `XRAY_CFG_PORTAL`/`XRAY_CFG_BRIDGE` for debugging.
 
@@ -12,9 +12,8 @@ Note: xray-core is now embedded in-process by default. Services build an Xray JS
 - Run XRPS (server):
   - `go run ./xrps -addr :8080`
   - Health: `GET /healthz`
-- REALITY helpers (keys use base64url without padding):
+  - REALITY helpers (keys use base64url without padding):
     - `GET /api/reality/x25519` → `{ privateKey, publicKey }` (base64)
-    - `GET /api/reality/mldsa65` → `{ seed (base64), seedHex, verifyHex }`
   - Create tunnel: `POST /api/tunnels` (see payload below)
   - Generate params: `POST /api/tunnels/{id}/connection-params`
   - System events (SSE): `GET /logs/stream`
@@ -48,11 +47,11 @@ Encryption policy
 - Optional config overrides:
   - XRPS reads `XRAY_CFG_PORTAL` (path to JSON). If set, XRPS uses this file instead of generated config and writes a copy to `xray.portal.json` in run dir.
   - XRPC reads `XRAY_CFG_BRIDGE` (path to JSON). If set, XRPC uses this file and writes a copy to `xray.bridge.json` in run dir.
-- Simulate failures: `XRPS_CORE_FAIL=true` or `XRPC_CORE_FAIL=true`.
+  
 
 Run directories and ports
-- Per-service run dir: `XRPS_XRAY_RUN_DIR`, `XRPC_XRAY_RUN_DIR` (defaults to log dir) — a copy of the effective config is written here.
-- Per-service internal API inbound port (diagnostic): `XRPS_XRAY_API_PORT` (default 10085), `XRPC_XRAY_API_PORT` (default 10086). If busy, a free port is auto-selected.
+- XRPS writes its effective config to `~/xrp/xray.portal.json`. On startup, if there are no tunnels loaded and this file exists, XRPS will reuse it instead of generating a minimal config. You can still override with `XRAY_CFG_PORTAL`.
+- XRPC writes its effective config to `~/xrp/xray.bridge.json`. On startup, if no profile is applied and this file exists, XRPC will reuse it instead of generating a minimal config. You can still override with `XRAY_CFG_BRIDGE`.
 
 Tips
 - In dev, you can simulate log streaming by appending lines to `./logs/access.log` or `./logs/error.log`; the SSE endpoints will push new lines.
@@ -68,9 +67,7 @@ POST `/api/tunnels`
   "handshake_port": 9443,
   "server_name": "www.fandom.com",
   "encryption": "none",
-  "entry_ports": [31234, 31235],
-  "enable_forward": false,
-  "forward_port": 443
+  "entry_ports": [31234, 31235]
 }
 ```
 

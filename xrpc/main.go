@@ -5,6 +5,7 @@ import (
     "crypto/ecdh"
     crand "crypto/rand"
     "crypto/sha256"
+    "crypto/subtle"
     "encoding/base64"
     "encoding/hex"
     "encoding/json"
@@ -117,9 +118,11 @@ func normalizeRealityKey32(s string) (string, error) {
 // sanitizeVLESSEncryption ensures the value is accepted by xray-core.
 // Allowed: "none" or advanced strings starting with "mlkem768x25519plus.".
 func sanitizeVLESSEncryption(s string) string {
-    s = strings.TrimSpace(strings.ToLower(s))
-    if s == "none" { return s }
-    if strings.HasPrefix(s, "mlkem768x25519plus.") { return s }
+    // Do NOT lowercase the whole string: base64url is case-sensitive.
+    s = strings.TrimSpace(s)
+    if strings.EqualFold(s, "none") { return "none" }
+    // Accept prefix case-insensitively, but keep original content
+    if strings.HasPrefix(strings.ToLower(s), "mlkem768x25519plus.") { return s }
     // fallback to none (Vision requires none for classic X25519 REALITY)
     return "none"
 }
@@ -248,15 +251,29 @@ func (c *Connector) patchTunnel(id string, mapPort *int, active *bool, target *s
 }
 
 func (c *Connector) deleteTunnel(id string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	st, ok := c.tunnelStates[id]
-	if !ok {
-		return false
-	}
-	st.Active = false
-	st.LastChange = time.Now()
-	return true
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    // remove runtime state entirely
+    _, existed := c.tunnelStates[id]
+    delete(c.tunnelStates, id)
+    // also remove from applied profile so it is truly gone from config
+    removed := false
+    if c.params != nil && len(c.params.Tunnels) > 0 {
+        dst := c.params.Tunnels[:0]
+        for _, t := range c.params.Tunnels {
+            if t.ID == id {
+                removed = true
+                continue
+            }
+            dst = append(dst, t)
+        }
+        c.params.Tunnels = dst
+    }
+    if existed || removed {
+        c.lastChange = time.Now()
+        return true
+    }
+    return false
 }
 
 type Server struct {
@@ -275,14 +292,134 @@ type Server struct {
     orch       *coreembed.Orchestrator
     // monitors
     monStop    chan struct{}
+    // auth
+    authPath  string
+    authUser  string
+    authSalt  string
+    authHash  string
+    
+    // stats store (in-memory ring buffers)
+    statsMu        sync.Mutex
+    statsTotal     []statsPoint
+    statsPerTunnel map[string][]statsPoint
+    wsStats        *shared.WSHub
+}
+
+type statsPoint struct {
+    TS    int64 `json:"ts"`
+    Up    int64 `json:"uplink"`
+    Down  int64 `json:"downlink"`
+}
+
+const statsCap = 1800 // ~1 hour at 2s interval
+
+func (s *Server) recordStats(ts int64, per map[string]struct{ up, down int64 }) {
+    s.statsMu.Lock()
+    defer s.statsMu.Unlock()
+    var totUp, totDown int64
+    if s.statsPerTunnel == nil { s.statsPerTunnel = make(map[string][]statsPoint) }
+    for id, v := range per {
+        totUp += v.up
+        totDown += v.down
+        arr := s.statsPerTunnel[id]
+        arr = append(arr, statsPoint{TS: ts, Up: v.up, Down: v.down})
+        if len(arr) > statsCap { arr = arr[len(arr)-statsCap:] }
+        s.statsPerTunnel[id] = arr
+    }
+    s.statsTotal = append(s.statsTotal, statsPoint{TS: ts, Up: totUp, Down: totDown})
+    if len(s.statsTotal) > statsCap { s.statsTotal = s.statsTotal[len(s.statsTotal)-statsCap:] }
+}
+
+// statsRange returns rate series (bytes/sec) since the given ms timestamp.
+func (s *Server) statsRange(since int64, tunnelID string) (series []statsPoint, intervalMs int64) {
+    s.statsMu.Lock()
+    defer s.statsMu.Unlock()
+    var arr []statsPoint
+    if tunnelID == "" {
+        arr = append(arr, s.statsTotal...)
+    } else {
+        arr = append(arr, s.statsPerTunnel[tunnelID]...)
+    }
+    // filter by since
+    start := 0
+    for i, p := range arr {
+        if p.TS >= since { start = i; break }
+    }
+    arr = arr[start:]
+    if len(arr) < 2 { return nil, 0 }
+    // compute deltas to rates
+    for i := 1; i < len(arr); i++ {
+        dt := arr[i].TS - arr[i-1].TS
+        if dt <= 0 { continue }
+        up := arr[i].Up - arr[i-1].Up
+        down := arr[i].Down - arr[i-1].Down
+        if up < 0 { up = 0 }
+        if down < 0 { down = 0 }
+        // bytes per second
+        series = append(series, statsPoint{TS: arr[i].TS, Up: up*1000/dt, Down: down*1000/dt})
+    }
+    // derive nominal interval from last step
+    intervalMs = arr[len(arr)-1].TS - arr[len(arr)-2].TS
+    if intervalMs <= 0 { intervalMs = 2000 }
+    return
+}
+
+// statsSnapshot gathers cumulative counters for each tunnel using xray-core stats.
+// The front-end polls this endpoint and computes deltas for rate charts.
+func (s *Server) statsSnapshot() map[string]any {
+    // Default empty snapshot when no profile or orchestrator is not ready
+    now := time.Now().UnixMilli()
+    out := map[string]any{
+        "ts": now,
+        "tunnels": []map[string]any{},
+        "total": map[string]any{"uplink": int64(0), "downlink": int64(0), "total": int64(0)},
+    }
+    if s.orch == nil {
+        return out
+    }
+    // Snapshot params and ordering
+    s.conn.mu.RLock()
+    p := s.conn.params
+    s.conn.mu.RUnlock()
+    if p == nil || len(p.Tunnels) == 0 {
+        return out
+    }
+    var tlist []map[string]any
+    var sumUp, sumDown int64
+    for i, t := range p.Tunnels {
+        revTag := fmt.Sprintf("rev-link-%d", i)
+        inbTag := fmt.Sprintf("r-inbound-%d", i)
+        // Sum both outbound and inbound counters (uplink/downlink)
+        var up, down int64
+        if v, ok := s.orch.GetCounter(fmt.Sprintf("outbound>>>%s>>>traffic>>>uplink", revTag)); ok { up += v }
+        if v, ok := s.orch.GetCounter(fmt.Sprintf("outbound>>>%s>>>traffic>>>downlink", revTag)); ok { down += v }
+        if v, ok := s.orch.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>uplink", inbTag)); ok { up += v }
+        if v, ok := s.orch.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>downlink", inbTag)); ok { down += v }
+        tlist = append(tlist, map[string]any{
+            "id": t.ID,
+            "tag": t.Tag,
+            "entry_port": t.EntryPort,
+            "uplink": up,
+            "downlink": down,
+            "total": up + down,
+        })
+        sumUp += up
+        sumDown += down
+    }
+    out["tunnels"] = tlist
+    out["total"] = map[string]any{"uplink": sumUp, "downlink": sumDown, "total": sumUp + sumDown}
+    return out
 }
 
 func (s *Server) routes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
-	mux.Handle("/logs/stream", s.logs)
-	mux.HandleFunc("/logs/access/stream", s.handleLogStream("access"))
-	mux.HandleFunc("/logs/error/stream", s.handleLogStream("error"))
+    mux := http.NewServeMux()
+    mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+    mux.Handle("/logs/stream", s.logs)
+    mux.HandleFunc("/logs/access/stream", s.handleLogStream("access"))
+    mux.HandleFunc("/logs/error/stream", s.handleLogStream("error"))
+    // WebSocket: real-time rates
+    if s.wsStats == nil { s.wsStats = shared.NewWSHub() }
+    mux.Handle("/ws/stats", s.wsStats)
 
 	// Tail N lines of logs
 	mux.HandleFunc("/api/logs", func(w http.ResponseWriter, r *http.Request) {
@@ -332,20 +469,7 @@ func (s *Server) routes() http.Handler {
             "privateKey": base64.RawURLEncoding.EncodeToString(priv.Bytes()),
         })
     })
-	mux.HandleFunc("/api/reality/mldsa65", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", 405)
-			return
-		}
-		b := make([]byte, 32)
-		_, _ = crand.Read(b)
-		h := sha256.Sum256(b)
-		writeJSON(w, map[string]string{
-			"seed":      base64.StdEncoding.EncodeToString(b),
-			"seedHex":   hex.EncodeToString(b),
-			"verifyHex": hex.EncodeToString(h[:]),
-		})
-	})
+    // removed: /api/reality/mldsa65 (unused feature)
 
 	if s.uiFS != nil {
 		mux.Handle("/ui/", http.StripPrefix("/ui/", http.FileServer(s.uiFS)))
@@ -387,6 +511,12 @@ func (s *Server) routes() http.Handler {
 			http.Error(w, err.Error(), 400)
 			return
 		}
+		// basic params validation
+		if err := p.Validate(); err != nil {
+			http.Error(w, "invalid profile: "+err.Error(), 400)
+			return
+		}
+        // forward-proxy removed: no extra port conflict check
 		if err := s.conn.ApplyParams(p); err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -416,6 +546,28 @@ func (s *Server) routes() http.Handler {
 			"status": s.conn.Status(),
 		})
 	})
+
+    // stats snapshot: cumulative bytes per tunnel based on xray counters
+    mux.HandleFunc("/api/stats/snapshot", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodGet {
+            http.Error(w, "method not allowed", 405)
+            return
+        }
+        writeJSON(w, s.statsSnapshot())
+    })
+
+    // stats range: bytes/sec rates since timestamp; optional tunnel=id
+    mux.HandleFunc("/api/stats/range", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodGet { http.Error(w, "method not allowed", 405); return }
+        q := r.URL.Query()
+        sinceStr := q.Get("since")
+        if sinceStr == "" { http.Error(w, "query since=epochMillis required", 400); return }
+        since, err := strconv.ParseInt(sinceStr, 10, 64)
+        if err != nil { http.Error(w, "invalid since", 400); return }
+        tunnel := q.Get("tunnel")
+        series, step := s.statsRange(since, tunnel)
+        writeJSON(w, map[string]any{"series": series, "interval": step})
+    })
 
 	mux.HandleFunc("/api/core/restart", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -470,8 +622,13 @@ func (s *Server) routes() http.Handler {
 				return
 			}
 			http.NotFound(w, r)
-		case http.MethodDelete:
+	case http.MethodDelete:
 			if s.conn.deleteTunnel(id) {
+				// apply change to embedded core so it is removed from effective config
+				if err := s.restartCore(); err != nil {
+					http.Error(w, "core restart failed: "+err.Error(), 500)
+					return
+				}
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
@@ -490,7 +647,7 @@ func (s *Server) routes() http.Handler {
 		fmt.Fprintf(w, "<!doctype html><title>XRPC</title><h1>XRPC running</h1><p>Paste Base64 to /api/profile/apply. Logs: /api/logs?type=access|error&tail=N, SSE: /logs/access/stream /logs/error/stream</p>")
 	})
 
-	return withCORS(mux)
+	return withCORS(s.secure(mux))
 }
 
 // handleLogStream streams entire file first, then follows via hub SSE.
@@ -555,6 +712,88 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 func stringsTrim(s string) string { return strings.TrimSpace(strings.Trim(s, "\n\r\t")) }
 
+// secure wraps handlers with HTTP Basic Auth (admin/<password>), except for /healthz and OPTIONS.
+func (s *Server) secure(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.Method == http.MethodOptions || r.URL.Path == "/healthz" {
+            next.ServeHTTP(w, r)
+            return
+        }
+        if s.authUser == "" || s.authHash == "" {
+            next.ServeHTTP(w, r)
+            return
+        }
+        user, pass, ok := r.BasicAuth()
+        if !ok || !s.checkPassword(user, pass) {
+            w.Header().Set("WWW-Authenticate", "Basic realm=\"XRPC\"")
+            http.Error(w, "unauthorized", http.StatusUnauthorized)
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
+}
+
+func (s *Server) checkPassword(user, pass string) bool {
+    if user != s.authUser { return false }
+    if s.authSalt == "" || s.authHash == "" { return false }
+    h := hashPassword(s.authSalt, pass)
+    if subtle.ConstantTimeCompare([]byte(h), []byte(s.authHash)) != 1 { return false }
+    return true
+}
+
+func hashPassword(salt, pass string) string {
+    sum := sha256.Sum256([]byte(salt + ":" + pass))
+    return hex.EncodeToString(sum[:])
+}
+
+func randomBase64URL(n int) string {
+    b := make([]byte, n)
+    _, _ = crand.Read(b)
+    return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func randomHex(n int) string {
+    b := make([]byte, n)
+    _, _ = crand.Read(b)
+    return hex.EncodeToString(b)
+}
+
+// initAuth loads or creates admin credentials in ~/xrpc/admin.auth.json
+func (s *Server) initAuth() error {
+    home, err := os.UserHomeDir()
+    if err != nil { return err }
+    dir := filepath.Join(home, "xrpc")
+    if err := os.MkdirAll(dir, 0o755); err != nil { return err }
+    path := filepath.Join(dir, "admin.auth.json")
+    s.authPath = path
+    type authFile struct {
+        Username  string `json:"username"`
+        Salt      string `json:"salt"`
+        Hash      string `json:"hash"`
+        CreatedAt string `json:"createdAt"`
+    }
+    if _, err := os.Stat(path); os.IsNotExist(err) {
+        user := "admin"
+        salt := randomHex(16)
+        pass := randomBase64URL(24)
+        h := hashPassword(salt, pass)
+        af := authFile{Username: user, Salt: salt, Hash: h, CreatedAt: time.Now().Format(time.RFC3339)}
+        b, _ := json.MarshalIndent(af, "", "  ")
+        _ = os.WriteFile(path, b, 0o600)
+        s.authUser, s.authSalt, s.authHash = user, salt, h
+        log.Printf("==== XRPC 初次运行创建管理员账户 ====")
+        log.Printf("用户名: admin  初始密码: %s", pass)
+        log.Printf("凭据文件: %s", path)
+        return nil
+    }
+    b, err := os.ReadFile(path)
+    if err != nil { return err }
+    var af authFile
+    if err := json.Unmarshal(b, &af); err != nil { return err }
+    s.authUser, s.authSalt, s.authHash = af.Username, af.Salt, af.Hash
+    return nil
+}
+
 // defaultTargetFromMapPort returns a 127.0.0.1:port target string.
 func defaultTargetFromMapPort(port int) string {
 	if port <= 0 {
@@ -613,6 +852,20 @@ func withCORS(next http.Handler) http.Handler {
 	})
 }
 
+// serverListenPort parses the HTTP server listen address and returns its port.
+func serverListenPort(addr string) int {
+    addr = strings.TrimSpace(addr)
+    if addr == "" { return 0 }
+    if strings.HasPrefix(addr, ":") {
+        if n, err := strconv.Atoi(strings.TrimPrefix(addr, ":")); err == nil { return n }
+        return 0
+    }
+    if _, p, err := net.SplitHostPort(addr); err == nil {
+        if n, err := strconv.Atoi(p); err == nil { return n }
+    }
+    return 0
+}
+
 // logStartupSummary prints a concise startup summary to the console.
 func (s *Server) logStartupSummary() {
 	log.Printf("==== XRPC startup ====")
@@ -634,39 +887,31 @@ func (s *Server) logStartupSummary() {
 	log.Printf("  /logs/stream  /logs/access/stream  /logs/error/stream")
 }
 
-// startCore simulates starting embedded xray-core and logs success/failure to console.
-// Set env XRPC_CORE_FAIL=true to simulate a启动失败 case.
+// startCore starts embedded xray-core and logs success/failure to console.
 func (s *Server) startCore() error {
-	log.Printf("xray-core: starting…")
-	fail := os.Getenv("XRPC_CORE_FAIL")
-	if strings.EqualFold(fail, "1") || strings.EqualFold(fail, "true") || strings.EqualFold(fail, "yes") {
-		err := fmt.Errorf("simulated failure (XRPC_CORE_FAIL=%s)", fail)
-		log.Printf("xray-core: start failed: %v", err)
-		s.logs.Broadcast(fmt.Sprintf("{\"event\":\"core_failed\",\"reason\":\"startup\",\"ts\":%d}", time.Now().Unix()))
-		return err
-	}
-	if s.orch == nil { s.orch = coreembed.New() }
-	runDir := os.Getenv("XRPC_XRAY_RUN_DIR")
-	if runDir == "" {
-		runDir = s.logDir
-	}
-	// Choose free port to avoid conflicts
-	apiPort := getenvInt("XRPC_XRAY_API_PORT", 10086)
-	apiPort = chooseFreePort(apiPort)
-	// Build bridge config from applied profile; fallback to minimal when absent
-	cfg, err := s.buildBridgeConfig(apiPort)
-	if err != nil {
-		log.Printf("xray-core: build bridge config failed, using minimal: %v", err)
-		cfg = []byte(fmt.Sprintf(`{
+    log.Printf("xray-core: starting…")
+    if s.orch == nil { s.orch = coreembed.New() }
+    // Store config under home directory: ~/xrp
+    var runDir string
+    if home, err := os.UserHomeDir(); err == nil { runDir = filepath.Join(home, "xrp") } else { runDir = s.logDir }
+    _ = os.MkdirAll(runDir, 0o755)
+    // Build bridge config from applied profile; on failure, try to reuse existing config file
+    cfgPath := os.Getenv("XRPC_XRAY_CFG_PATH")
+    if cfgPath == "" { cfgPath = filepath.Join(runDir, "xray.bridge.json") }
+    cfg, err := s.buildBridgeConfig()
+    if err != nil {
+        if b, rerr := os.ReadFile(cfgPath); rerr == nil {
+            log.Printf("xray-core: build failed, reusing existing config at %s: %v", cfgPath, err)
+            cfg = b
+        } else {
+            log.Printf("xray-core: build bridge config failed, using minimal: %v", err)
+            cfg = []byte(fmt.Sprintf(`{
       "log": {"loglevel": "warning", "access": %q, "error": %q},
-      "inbounds": [
-        {"tag":"api","listen":"127.0.0.1","port":%d,"protocol":"dokodemo-door","settings":{"address":"127.0.0.1","port":1}}
-      ],
-      "outbounds": [
-        {"protocol": "blackhole", "tag":"blackhole"}
-      ]
-    }`, s.accessPath, s.errorPath, apiPort))
-	}
+      "outbounds": [{"protocol": "blackhole", "tag":"blackhole"}],
+      "routing": {"rules": []}
+    }`, s.accessPath, s.errorPath))
+        }
+    }
 	if p := os.Getenv("XRAY_CFG_BRIDGE"); p != "" {
 		if b, err := os.ReadFile(p); err == nil {
 			cfg = b
@@ -675,8 +920,7 @@ func (s *Server) startCore() error {
 		}
 	}
     // Fixed config filename by default; can override with XRPC_XRAY_CFG_PATH
-    cfgPath := os.Getenv("XRPC_XRAY_CFG_PATH")
-    if cfgPath == "" { cfgPath = "xray.bridge.json" }
+    // cfgPath computed above
     // Print effective config for debugging, then write debug copy and start embedded core
     log.Printf("xray-core: effective bridge config:\n%s", string(cfg))
     // Write debug copy then start embedded core
@@ -695,28 +939,29 @@ func (s *Server) startCore() error {
 func (s *Server) restartCore() error {
     log.Printf("xray-core: restarting…")
     if s.orch == nil { s.orch = coreembed.New() }
-    runDir := os.Getenv("XRPC_XRAY_RUN_DIR")
-    if runDir == "" { runDir = s.logDir }
-    apiPort := getenvInt("XRPC_XRAY_API_PORT", 10086)
-    apiPort = chooseFreePort(apiPort)
-    cfg, err := s.buildBridgeConfig(apiPort)
+    // Store config under home directory: ~/xrp
+    var runDir string
+    if home, err := os.UserHomeDir(); err == nil { runDir = filepath.Join(home, "xrp") } else { runDir = s.logDir }
+    _ = os.MkdirAll(runDir, 0o755)
+    cfgPath := filepath.Join(runDir, "xray.bridge.json")
+    cfg, err := s.buildBridgeConfig()
     if err != nil {
-        log.Printf("xray-core: build bridge config failed, using minimal: %v", err)
-        cfg = []byte(fmt.Sprintf(`{
+        if b, rerr := os.ReadFile(cfgPath); rerr == nil {
+            log.Printf("xray-core: build failed, reusing existing config at %s: %v", cfgPath, err)
+            cfg = b
+        } else {
+            log.Printf("xray-core: build bridge config failed, using minimal: %v", err)
+            cfg = []byte(fmt.Sprintf(`{
       "log": {"loglevel": "warning", "access": %q, "error": %q},
-      "inbounds": [
-        {"tag":"api","listen":"127.0.0.1","port":%d,"protocol":"dokodemo-door","settings":{"address":"127.0.0.1","port":1}}
-      ],
-      "outbounds": [
-        {"protocol": "blackhole", "tag":"blackhole"}
-      ]
-    }`, s.accessPath, s.errorPath, apiPort))
+      "outbounds": [{"protocol": "blackhole", "tag":"blackhole"}],
+      "routing": {"rules": []}
+    }`, s.accessPath, s.errorPath))
+        }
     }
     if p := os.Getenv("XRAY_CFG_BRIDGE"); p != "" {
         if b, err := os.ReadFile(p); err == nil { cfg = b } else { log.Printf("xray-core: warn cannot read XRAY_CFG_BRIDGE=%s: %v", p, err) }
     }
-    cfgPath := os.Getenv("XRPC_XRAY_CFG_PATH")
-    if cfgPath == "" { cfgPath = "xray.bridge.json" }
+    // cfgPath computed above
     // Print effective config for debugging on restart
     log.Printf("xray-core: effective bridge config (restart):\n%s", string(cfg))
     _ = os.WriteFile(cfgPath, cfg, 0o644)
@@ -732,7 +977,7 @@ func (s *Server) restartCore() error {
 // local tunnel states. It follows PRD: for each tunnel, create a rev-link
 // VLESS+REALITY outbound with reverse.tag=r-inbound-{i}, and route that
 // inbound tag to a local freedom redirect (target).
-func (s *Server) buildBridgeConfig(apiPort int) ([]byte, error) {
+func (s *Server) buildBridgeConfig() ([]byte, error) {
     s.conn.mu.RLock()
     p := s.conn.params
     // Snapshot states to avoid holding lock during JSON building
@@ -744,15 +989,7 @@ func (s *Server) buildBridgeConfig(apiPort int) ([]byte, error) {
         return nil, fmt.Errorf("no active profile")
     }
 
-    inbounds := make([]map[string]any, 0, 2)
-    // Keep API inbound for diagnostics
-    inbounds = append(inbounds, map[string]any{
-        "tag":     "api",
-        "listen":  "127.0.0.1",
-        "port":    apiPort,
-        "protocol": "dokodemo-door",
-        "settings": map[string]any{"address": "127.0.0.1", "port": 1},
-    })
+    inbounds := make([]map[string]any, 0, 1)
 
     outbounds := make([]map[string]any, 0, 2+len(p.Tunnels)*2)
     // default direct outbound (freedom)
@@ -760,50 +997,7 @@ func (s *Server) buildBridgeConfig(apiPort int) ([]byte, error) {
 
     rules := make([]map[string]any, 0, len(p.Tunnels)+1)
 
-    // Optional forward proxy via portal
-    if p.Forward.Enabled {
-        // socks inbound on localhost
-        port := p.Forward.Port
-        if port <= 0 { port = 10808 }
-        inbounds = append(inbounds, map[string]any{
-            "tag": "socks-in", "listen": "127.0.0.1", "port": port, "protocol": "socks",
-            "settings": map[string]any{"udp": true},
-        })
-        // vless outbound to portal forward port
-        // normalize REALITY pubkey (accept std/url/hex; output url-no-pad)
-        fwdPK, err := normalizeRealityKey32(p.Forward.PublicKey)
-        if err != nil {
-            return nil, fmt.Errorf("invalid forward.publicKey: %w", err)
-        }
-        outbounds = append(outbounds, map[string]any{
-            "tag":      "proxy",
-            "protocol": "vless",
-            "settings": map[string]any{
-                "vnext": []map[string]any{
-                    {
-                        "address": p.PortalAddr,
-                        "port":    p.Forward.Port,
-                        "users": []map[string]any{
-                            {"id": p.Forward.ID, "encryption": "none", "flow": nonEmpty(p.Forward.Flow, "xtls-rprx-vision")},
-                        },
-                    },
-                },
-            },
-            "streamSettings": map[string]any{
-                "network":  "tcp",
-                "security": "reality",
-                "realitySettings": map[string]any{
-                    "serverName": p.Forward.ServerName,
-                    "publicKey":  fwdPK,
-                    "shortId":    p.Forward.ShortID,
-                    "fingerprint": "chrome",
-                    "spiderX":     "/",
-                },
-            },
-            "mux": map[string]any{"enabled": false},
-        })
-        rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"socks-in"}, "outboundTag": "proxy"})
-    }
+    // forward-proxy removed: no socks-in / proxy outbound
 
     // For each tunnel, create a reverse link + local redirect outbound + route
     for i, t := range p.Tunnels {
@@ -863,7 +1057,7 @@ func (s *Server) buildBridgeConfig(apiPort int) ([]byte, error) {
 
     cfg := map[string]any{
         "log": map[string]any{"loglevel": "warning", "access": s.accessPath, "error": s.errorPath},
-        // Enable API + Stats + Policy to expose counters for connectivity probing
+        // Enable Stats + Policy for in-process counters
         "api": map[string]any{"tag": "api", "services": []string{"HandlerService", "LoggerService", "StatsService"}},
         "stats": map[string]any{},
         "policy": map[string]any{
@@ -879,7 +1073,7 @@ func (s *Server) buildBridgeConfig(apiPort int) ([]byte, error) {
         },
         "inbounds": inbounds,
         "outbounds": outbounds,
-        "routing": map[string]any{"rules": append([]map[string]any{{"ruleTag": "api", "inboundTag": []string{"api"}, "outboundTag": "api"}}, rules...)},
+        "routing": map[string]any{"rules": rules},
     }
     b, err := json.MarshalIndent(cfg, "", "  ")
     if err != nil { return nil, err }
@@ -956,6 +1150,10 @@ func main() {
 	}
 
 	s.logStartupSummary()
+    // init admin auth
+    if err := s.initAuth(); err != nil {
+        log.Printf("auth init failed: %v", err)
+    }
     // Attempt to start core with exponential backoff ensure loop
     go s.ensureCoreRunning()
     // start stats/error monitors
@@ -1002,6 +1200,8 @@ func (s *Server) restartMonitors() {
 func (s *Server) statsMonitor(stop <-chan struct{}) {
     prev := make(map[string]int64)
     lastInc := make(map[string]time.Time)
+    prevPer := make(map[string]struct{ up, down int64 })
+    var prevTs int64
     ticker := time.NewTicker(2 * time.Second)
     defer ticker.Stop()
     for {
@@ -1009,6 +1209,7 @@ func (s *Server) statsMonitor(stop <-chan struct{}) {
         case <-stop:
             return
         case <-ticker.C:
+            ts := time.Now().UnixMilli()
             s.conn.mu.RLock()
             p := s.conn.params
             s.conn.mu.RUnlock()
@@ -1016,15 +1217,19 @@ func (s *Server) statsMonitor(stop <-chan struct{}) {
                 continue
             }
             // iterate tunnels in order for consistent index->tag mapping
+            per := make(map[string]struct{ up, down int64 })
             for i, t := range p.Tunnels {
                 revTag := fmt.Sprintf("rev-link-%d", i)
                 inbTag := fmt.Sprintf("r-inbound-%d", i)
                 // sum counters we care about
                 sum := int64(0)
-                if v, ok := s.orch.GetCounter(fmt.Sprintf("outbound>>>%s>>>traffic>>>uplink", revTag)); ok { sum += v }
-                if v, ok := s.orch.GetCounter(fmt.Sprintf("outbound>>>%s>>>traffic>>>downlink", revTag)); ok { sum += v }
-                if v, ok := s.orch.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>uplink", inbTag)); ok { sum += v }
-                if v, ok := s.orch.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>downlink", inbTag)); ok { sum += v }
+                up := int64(0)
+                down := int64(0)
+                if v, ok := s.orch.GetCounter(fmt.Sprintf("outbound>>>%s>>>traffic>>>uplink", revTag)); ok { sum += v; up += v }
+                if v, ok := s.orch.GetCounter(fmt.Sprintf("outbound>>>%s>>>traffic>>>downlink", revTag)); ok { sum += v; down += v }
+                if v, ok := s.orch.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>uplink", inbTag)); ok { sum += v; up += v }
+                if v, ok := s.orch.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>downlink", inbTag)); ok { sum += v; down += v }
+                per[t.ID] = struct{ up, down int64 }{up: up, down: down}
 
                 pid := t.ID
                 if last, ok := prev[pid]; ok {
@@ -1045,6 +1250,43 @@ func (s *Server) statsMonitor(stop <-chan struct{}) {
                 }
                 prev[pid] = sum
             }
+            // store cumulative snapshot for history queries
+            s.recordStats(ts, per)
+            // Broadcast real-time rates via WS
+            if s.wsStats != nil && prevTs > 0 {
+                dt := ts - prevTs
+                if dt > 0 {
+                    type item struct{ ID, Tag string; EntryPort int; Up, Down, BytesUp, BytesDown int64 }
+                    var items []item
+                    var sumUp, sumDown int64
+                    var cumUp, cumDown int64
+                    for _, t := range p.Tunnels {
+                        cur := per[t.ID]
+                        prev := prevPer[t.ID]
+                        up := cur.up - prev.up
+                        down := cur.down - prev.down
+                        if up < 0 { up = 0 }
+                        if down < 0 { down = 0 }
+                        // bytes/sec
+                        up = up * 1000 / dt
+                        down = down * 1000 / dt
+                        items = append(items, item{ID: t.ID, Tag: t.Tag, EntryPort: t.EntryPort, Up: up, Down: down, BytesUp: cur.up, BytesDown: cur.down})
+                        sumUp += up
+                        sumDown += down
+                        cumUp += cur.up
+                        cumDown += cur.down
+                    }
+                    msg := map[string]any{
+                        "ts": ts,
+                        "total": map[string]any{"up": sumUp, "down": sumDown},
+                        "bytes": map[string]any{"up": cumUp, "down": cumDown},
+                        "tunnels": items,
+                    }
+                    s.wsStats.BroadcastJSON(msg)
+                }
+            }
+            prevPer = per
+            prevTs = ts
         }
     }
 }

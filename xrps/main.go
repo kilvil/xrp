@@ -3,7 +3,9 @@ package main
 import (
     "context"
     crand "crypto/rand"
+    "crypto/mlkem"
     "crypto/sha256"
+    "crypto/subtle"
     "encoding/hex"
     "encoding/json"
     "flag"
@@ -32,9 +34,10 @@ type Tunnel struct {
     Portal    string                 `json:"portal_addr"`
     Handshake shared.HandshakeConfig `json:"handshake"`
     Entries   []shared.TunnelEntry   `json:"entries"`
-    Forward   shared.ForwardConfig   `json:"forward"`
     // PrivKey: REALITY private key (base64url, 32 bytes). Not exposed.
     PrivKey   string                 `json:"-"`
+    // VLESSDec stores server-side decryption string for ML-KEM/X25519+ (not exposed in APIs)
+    VLESSDec  string                 `json:"-"`
     CreatedAt time.Time              `json:"createdAt"`
     UpdatedAt time.Time              `json:"updatedAt"`
 }
@@ -79,9 +82,8 @@ type createTunnelReq struct {
     HandshakePort int    `json:"handshake_port"`
     ServerName    string `json:"server_name"`
     Encryption    string `json:"encryption"` // pq|x25519|none
+    Decryption    string `json:"decryption,omitempty"`
     EntryPorts    []int  `json:"entry_ports"`
-    EnableForward bool   `json:"enable_forward"`
-    ForwardPort   int    `json:"forward_port"`
     // Optional REALITY advanced inputs (if empty, server will randomize)
     PublicKey     string `json:"public_key,omitempty"`
     ShortID       string `json:"short_id,omitempty"`
@@ -111,6 +113,129 @@ type Server struct {
     tailAccess *shared.FileTailer
     tailError  *shared.FileTailer
     orch  *coreembed.Orchestrator
+    // auth
+    authPath  string
+    authUser  string
+    authSalt  string
+    authHash  string
+    // stats store & monitor
+    statsMu        sync.Mutex
+    statsTotal     []statsPoint
+    statsPerEntry  map[string][]statsPoint
+    statsStop      chan struct{}
+    // WS stats hub
+    wsStats        *shared.WSHub
+}
+
+type statsPoint struct {
+    TS   int64 `json:"ts"`
+    Up   int64 `json:"uplink"`
+    Down int64 `json:"downlink"`
+}
+
+const statsCap = 1800
+
+func (s *Server) recordStats(ts int64, per map[string]struct{ up, down int64 }) {
+    s.statsMu.Lock(); defer s.statsMu.Unlock()
+    var totUp, totDown int64
+    if s.statsPerEntry == nil { s.statsPerEntry = make(map[string][]statsPoint) }
+    for id, v := range per {
+        totUp += v.up; totDown += v.down
+        arr := s.statsPerEntry[id]
+        arr = append(arr, statsPoint{TS: ts, Up: v.up, Down: v.down})
+        if len(arr) > statsCap { arr = arr[len(arr)-statsCap:] }
+        s.statsPerEntry[id] = arr
+    }
+    s.statsTotal = append(s.statsTotal, statsPoint{TS: ts, Up: totUp, Down: totDown})
+    if len(s.statsTotal) > statsCap { s.statsTotal = s.statsTotal[len(s.statsTotal)-statsCap:] }
+}
+
+func (s *Server) statsRange(since int64, entryID string) (series []statsPoint, intervalMs int64) {
+    s.statsMu.Lock(); defer s.statsMu.Unlock()
+    var arr []statsPoint
+    if entryID == "" { arr = append(arr, s.statsTotal...) } else { arr = append(arr, s.statsPerEntry[entryID]...) }
+    // filter by since
+    start := 0
+    for i, p := range arr { if p.TS >= since { start = i; break } }
+    arr = arr[start:]
+    if len(arr) < 2 { return nil, 0 }
+    for i := 1; i < len(arr); i++ {
+        dt := arr[i].TS - arr[i-1].TS
+        if dt <= 0 { continue }
+        up := arr[i].Up - arr[i-1].Up
+        down := arr[i].Down - arr[i-1].Down
+        if up < 0 { up = 0 }
+        if down < 0 { down = 0 }
+        series = append(series, statsPoint{TS: arr[i].TS, Up: up*1000/dt, Down: down*1000/dt})
+    }
+    intervalMs = arr[len(arr)-1].TS - arr[len(arr)-2].TS
+    if intervalMs <= 0 { intervalMs = 2000 }
+    return
+}
+
+// startStatsMonitor polls xray counters periodically and feeds in-memory buffers
+func (s *Server) startStatsMonitor() {
+    if s.statsStop != nil { close(s.statsStop) }
+    stop := make(chan struct{})
+    s.statsStop = stop
+    go func() {
+        ticker := time.NewTicker(2 * time.Second)
+        defer ticker.Stop()
+        var prev map[string]struct{ up, down int64 }
+        var prevTs int64
+        for {
+            select {
+            case <-stop:
+                return
+            case <-ticker.C:
+                if s.orch == nil { continue }
+                ts := time.Now().UnixMilli()
+                // pick active tunnel (same logic as buildPortalConfig)
+                tunnels := s.store.All()
+                if len(tunnels) == 0 { continue }
+                active := tunnels[0]
+                for _, t := range tunnels { if t.UpdatedAt.After(active.UpdatedAt) { active = t } }
+                per := make(map[string]struct{ up, down int64 })
+                for i, e := range active.Entries {
+                    inbTag := fmt.Sprintf("t-inbound-%d", i+1)
+                    up, down := int64(0), int64(0)
+                    if v, ok := s.orch.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>uplink", inbTag)); ok { up += v }
+                    if v, ok := s.orch.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>downlink", inbTag)); ok { down += v }
+                    per[e.ID] = struct{ up, down int64 }{up: up, down: down}
+                }
+                s.recordStats(ts, per)
+                // WS broadcast of rates
+                if s.wsStats != nil && prevTs > 0 {
+                    dt := ts - prevTs
+                    if dt > 0 {
+                        type item struct{ ID, Tag string; EntryPort int; Up, Down, BytesUp, BytesDown int64 }
+                        var items []item
+                        var sumUp, sumDown int64
+                        var cumUp, cumDown int64
+                        for _, e := range active.Entries {
+                            cur := per[e.ID]
+                            pre := prev[e.ID]
+                            up := cur.up - pre.up
+                            down := cur.down - pre.down
+                            if up < 0 { up = 0 }
+                            if down < 0 { down = 0 }
+                            up = up * 1000 / dt
+                            down = down * 1000 / dt
+                            items = append(items, item{ID: e.ID, Tag: e.Tag, EntryPort: e.EntryPort, Up: up, Down: down, BytesUp: cur.up, BytesDown: cur.down})
+                            sumUp += up
+                            sumDown += down
+                            cumUp += cur.up
+                            cumDown += cur.down
+                        }
+                        msg := map[string]any{"ts": ts, "total": map[string]any{"up": sumUp, "down": sumDown}, "bytes": map[string]any{"up": cumUp, "down": cumDown}, "tunnels": items}
+                        s.wsStats.BroadcastJSON(msg)
+                    }
+                }
+                prev = per
+                prevTs = ts
+            }
+        }
+    }()
 }
 
 func randomHex(n int) string { b := make([]byte, n); _, _ = crand.Read(b); return hex.EncodeToString(b) }
@@ -136,15 +261,6 @@ func genX25519() (string, string, error) {
     return base64.RawURLEncoding.EncodeToString(pb), base64.RawURLEncoding.EncodeToString(pr), nil
 }
 
-// genMLDSA65 returns pseudo seed/verify (placeholder without PQ crypto)
-func genMLDSA65() (seed string, verify string) {
-    b := make([]byte, 32)
-    _, _ = crand.Read(b)
-    seed = hex.EncodeToString(b)
-    h := sha256.Sum256(b)
-    verify = hex.EncodeToString(h[:])
-    return
-}
 
 // normalizeRealityKey32 ensures the REALITY key is base64url (no padding) of 32 bytes.
 func normalizeRealityKey32(s string) (string, error) {
@@ -168,9 +284,19 @@ func normalizeRealityKey32(s string) (string, error) {
 // sanitizeVLESSEncryption ensures it matches xray-core expectations.
 // Allowed simple: "none"; advanced PQ: strings starting with "mlkem768x25519plus.".
 func sanitizeVLESSEncryption(s string) string {
-    s = strings.TrimSpace(strings.ToLower(s))
-    if s == "none" { return s }
-    if strings.HasPrefix(s, "mlkem768x25519plus.") { return s }
+    // Preserve case for base64url payload; only trim and validate prefix.
+    s = strings.TrimSpace(s)
+    if strings.EqualFold(s, "none") { return "none" }
+    if strings.HasPrefix(strings.ToLower(s), "mlkem768x25519plus.") { return s }
+    return "none"
+}
+
+// sanitizeVLESSDecryption mirrors encryption sanitation for inbound usage.
+// Allowed: "none" or strings starting with "mlkem768x25519plus.".
+func sanitizeVLESSDecryption(s string) string {
+    s = strings.TrimSpace(s)
+    if strings.EqualFold(s, "none") || s == "" { return "none" }
+    if strings.HasPrefix(strings.ToLower(s), "mlkem768x25519plus.") { return s }
     return "none"
 }
 
@@ -184,6 +310,9 @@ func (s *Server) routes() http.Handler {
     mux.Handle("/logs/stream", s.logs)
     mux.HandleFunc("/logs/access/stream", s.handleLogStream("access"))
     mux.HandleFunc("/logs/error/stream", s.handleLogStream("error"))
+    // WebSocket: real-time rates
+    if s.wsStats == nil { s.wsStats = shared.NewWSHub() }
+    mux.Handle("/ws/stats", s.wsStats)
 
     // tail last N lines of access/error
     mux.HandleFunc("/api/logs", func(w http.ResponseWriter, r *http.Request) {
@@ -211,15 +340,50 @@ func (s *Server) routes() http.Handler {
         if err != nil { http.Error(w, err.Error(), 500); return }
         writeJSON(w, map[string]string{"publicKey": pub, "privateKey": priv})
     })
-    mux.HandleFunc("/api/reality/mldsa65", func(w http.ResponseWriter, r *http.Request) {
+    // removed: /api/reality/mldsa65 (unused feature)
+
+    // generate VLESS Encryption decryption/encryption pair
+    // query: algo = pq|mlkem768|x25519 (default pq), mode=native (reserved), seconds=600
+    mux.HandleFunc("/api/vlessenc", func(w http.ResponseWriter, r *http.Request) {
         if r.Method != http.MethodGet { http.Error(w, "method not allowed", 405); return }
-        b := make([]byte, 32)
-        _, _ = crand.Read(b)
-        h := sha256.Sum256(b)
-        writeJSON(w, map[string]string{
-            "seed":     base64.StdEncoding.EncodeToString(b),
-            "seedHex":  hex.EncodeToString(b),
-            "verifyHex": hex.EncodeToString(h[:]),
+        q := r.URL.Query()
+        algo := strings.ToLower(strings.TrimSpace(q.Get("algo")))
+        if algo == "" { algo = "pq" }
+        // Only one mode supported currently
+        _ = q.Get("mode")
+        sec := strings.TrimSpace(q.Get("seconds"))
+        if sec == "" { sec = "600" }
+        // header prefix
+        const algHeader = "mlkem768x25519plus"
+        mode := "native"
+        var decryption, encryption string
+        switch algo {
+        case "x25519":
+            // Use X25519: decryption carries 32-byte private key; encryption carries 32-byte public key
+            pub, priv, err := genX25519()
+            if err != nil { http.Error(w, err.Error(), 500); return }
+            decryption = algHeader + "." + mode + "." + sec + "s." + priv
+            encryption = algHeader + "." + mode + ".0rtt." + pub
+        case "pq", "mlkem768", "ml-kem-768", "ml_kem_768":
+            // Generate ML-KEM-768 decapsulation seed (64 bytes) and encapsulation key (1184 bytes)
+            var seed [64]byte
+            _, _ = crand.Read(seed[:])
+            dkey, err := mlkem.NewDecapsulationKey768(seed[:])
+            if err != nil { http.Error(w, "mlkem768 keygen failed: "+err.Error(), 500); return }
+            client := dkey.EncapsulationKey().Bytes()
+            serverKey := base64.RawURLEncoding.EncodeToString(seed[:])
+            clientKey := base64.RawURLEncoding.EncodeToString(client)
+            decryption = algHeader + "." + mode + "." + sec + "s." + serverKey
+            encryption = algHeader + "." + mode + ".0rtt." + clientKey
+        default:
+            http.Error(w, "unknown algo: use pq|x25519", 400); return
+        }
+        writeJSON(w, map[string]any{
+            "algorithm":  algHeader,
+            "mode":       mode,
+            "decryption": decryption,
+            "encryption": encryption,
+            "note":       "Choose one authentication; do not mix X25519 and ML-KEM-768.",
         })
     })
 
@@ -227,6 +391,25 @@ func (s *Server) routes() http.Handler {
     if s.uiFS != nil {
         mux.Handle("/ui/", http.StripPrefix("/ui/", http.FileServer(s.uiFS)))
     }
+
+    // stats snapshot: cumulative bytes by entry for active tunnel
+    mux.HandleFunc("/api/stats/snapshot", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodGet { http.Error(w, "method not allowed", 405); return }
+        writeJSON(w, s.statsSnapshot())
+    })
+
+    // stats range: bytes/sec since timestamp; optional entry=id
+    mux.HandleFunc("/api/stats/range", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodGet { http.Error(w, "method not allowed", 405); return }
+        q := r.URL.Query()
+        sinceStr := q.Get("since")
+        if sinceStr == "" { http.Error(w, "query since=epochMillis required", 400); return }
+        since, err := strconv.ParseInt(sinceStr, 10, 64)
+        if err != nil { http.Error(w, "invalid since", 400); return }
+        entry := q.Get("entry")
+        series, step := s.statsRange(since, entry)
+        writeJSON(w, map[string]any{"series": series, "interval": step})
+    })
 
     // core control
     mux.HandleFunc("/api/core/restart", func(w http.ResponseWriter, r *http.Request) {
@@ -262,6 +445,8 @@ func (s *Server) routes() http.Handler {
                 Encryption: sanitizeVLESSEncryption(req.Encryption),
                 Flow:       "xtls-rprx-vision",
             }
+            // Optional PQ decryption for portal inbound
+            vlessDec := sanitizeVLESSDecryption(req.Decryption)
             var privKey string
             // If client provided a private key (preferred flow when FE fetched from BE),
             // normalize and derive publicKey from it to ensure consistency.
@@ -278,30 +463,9 @@ func (s *Server) routes() http.Handler {
                     }
                 }
             }
-            // Derive from env private key if available
-            if privKey == "" && (strings.TrimSpace(os.Getenv("XRPS_REALITY_PRIVATE_KEY")) != "" || strings.TrimSpace(os.Getenv("XRAY_REALITY_PRIVATE_KEY")) != "") {
-                priv := strings.TrimSpace(os.Getenv("XRPS_REALITY_PRIVATE_KEY"))
-                if priv == "" { priv = os.Getenv("XRAY_REALITY_PRIVATE_KEY") }
-                if norm, err := normalizeRealityKey32(priv); err == nil {
-                    privKey = norm
-                    if b, err := base64.RawURLEncoding.DecodeString(norm); err == nil && len(b) == 32 {
-                        if pk, err := ecdh.X25519().NewPrivateKey(b); err == nil {
-                            pub := pk.PublicKey().Bytes()
-                            h.PublicKey = base64.RawURLEncoding.EncodeToString(pub)
-                        }
-                    }
-                }
-            }
-            if h.PublicKey == "" {
-                // If request provided, try to normalize; else generate a new pair (for preview; won't match server unless env set)
-                if req.PublicKey != "" {
-                    if norm, err := normalizeRealityKey32(req.PublicKey); err == nil { h.PublicKey = norm }
-                }
-            }
-            if h.PublicKey == "" {
-                pub, priv, _ := genX25519()
-                h.PublicKey = pub
-                privKey = priv
+            // Require private key to be provided; derive public key from it.
+            if strings.TrimSpace(privKey) == "" {
+                http.Error(w, "private_key is required", 400); return
             }
             if h.ShortID == "" { h.ShortID = randomHex(8) }
             entries := make([]shared.TunnelEntry, 0, len(req.EntryPorts))
@@ -310,22 +474,15 @@ func (s *Server) routes() http.Handler {
                     EntryPort:   ep,
                     ID:          randomUUID(),
                     Tag:         fmt.Sprintf("t%d", i+1),
-                    MapPortHint: 80 + i,
+                    // Remove default map port hint; XRPC will ask user for target.
+                    MapPortHint: 0,
                 })
             }
-            fwd := shared.ForwardConfig{}
-            if req.EnableForward {
-                fwd = shared.ForwardConfig{
-                    Enabled:    true,
-                    Port:       req.ForwardPort,
-                    ID:         randomUUID(),
-                    ServerName: req.ServerName,
-                    PublicKey:  h.PublicKey,
-                    ShortID:    randomHex(8),
-                    Flow:       "xtls-rprx-vision",
-                }
+            t := &Tunnel{ID: id, Name: req.Name, Portal: req.PortalAddr, Handshake: h, Entries: entries, PrivKey: privKey, VLESSDec: vlessDec, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+            // server-side configuration validation + port conflict detection
+            if err := s.validateTunnelConfig(t); err != nil {
+                http.Error(w, err.Error(), 400); return
             }
-            t := &Tunnel{ID: id, Name: req.Name, Portal: req.PortalAddr, Handshake: h, Entries: entries, Forward: fwd, PrivKey: privKey, CreatedAt: time.Now(), UpdatedAt: time.Now()}
             s.store.Add(t)
             // restart core to apply updated portal config (best-effort)
             if err := s.restartCore(); err != nil {
@@ -365,9 +522,8 @@ func (s *Server) routes() http.Handler {
                     HandshakePort *int    `json:"handshake_port,omitempty"`
                     ServerName    *string `json:"server_name,omitempty"`
                     Encryption    *string `json:"encryption,omitempty"`
+                    Decryption    *string `json:"decryption,omitempty"`
                     EntryPorts    *[]int  `json:"entry_ports,omitempty"`
-                    EnableForward *bool   `json:"enable_forward,omitempty"`
-                    ForwardPort   *int    `json:"forward_port,omitempty"`
                     PrivateKey    *string `json:"private_key,omitempty"`
                 }
                 var req patchTunnelReq
@@ -376,18 +532,15 @@ func (s *Server) routes() http.Handler {
                 if req.Name != nil { t.Name = *req.Name }
                 if req.PortalAddr != nil { t.Portal = *req.PortalAddr }
                 if req.HandshakePort != nil { t.Handshake.Port = *req.HandshakePort }
-                if req.ServerName != nil {
-                    t.Handshake.ServerName = *req.ServerName
-                    // optionally align forward SNI if enabled
-                    if t.Forward.Enabled {
-                        t.Forward.ServerName = *req.ServerName
-                    }
-                }
+                if req.ServerName != nil { t.Handshake.ServerName = *req.ServerName }
                 if req.Encryption != nil {
                     if strings.EqualFold(*req.Encryption, "pq") {
                         http.Error(w, "encryption 'pq' is not supported; use 'none' or 'mlkem768x25519plus.*'", 400); return
                     }
                     t.Handshake.Encryption = sanitizeVLESSEncryption(*req.Encryption)
+                }
+                if req.Decryption != nil {
+                    t.VLESSDec = sanitizeVLESSDecryption(*req.Decryption)
                 }
                 if req.EntryPorts != nil {
                     // rebuild entries from provided ports
@@ -398,42 +551,28 @@ func (s *Server) routes() http.Handler {
                             EntryPort:   ep,
                             ID:          randomUUID(),
                             Tag:         fmt.Sprintf("t%d", i+1),
-                            MapPortHint: 80 + i,
+                            // Remove default map port hint; XRPC will ask user for target.
+                            MapPortHint: 0,
                         })
                     }
                     t.Entries = entries
                 }
-                if req.EnableForward != nil {
-                    if *req.EnableForward {
-                        if !t.Forward.Enabled {
-                            t.Forward.Enabled = true
-                            if t.Forward.ID == "" { t.Forward.ID = randomUUID() }
-                            if t.Forward.ServerName == "" { t.Forward.ServerName = t.Handshake.ServerName }
-                            if t.Forward.PublicKey == "" { t.Forward.PublicKey = randomHex(32) }
-                            if t.Forward.ShortID == "" { t.Forward.ShortID = randomHex(8) }
-                            if t.Forward.Flow == "" { t.Forward.Flow = "xtls-rprx-vision" }
-                        }
-                    } else {
-                        t.Forward.Enabled = false
-                    }
-                }
-                if req.ForwardPort != nil { t.Forward.Port = *req.ForwardPort }
+                // forward-proxy removed
                 if req.PrivateKey != nil {
                     pk := strings.TrimSpace(*req.PrivateKey)
-                    if pk == "" {
-                        t.PrivKey = ""
-                    } else {
-                        norm, err := normalizeRealityKey32(pk)
-                        if err != nil { http.Error(w, "invalid private_key: expect base64url 32 bytes", 400); return }
-                        t.PrivKey = norm
-                        if b, err := base64.RawURLEncoding.DecodeString(norm); err == nil && len(b) == 32 {
-                            if sk, err := ecdh.X25519().NewPrivateKey(b); err == nil {
-                                pub := sk.PublicKey().Bytes()
-                                t.Handshake.PublicKey = base64.RawURLEncoding.EncodeToString(pub)
-                            }
+                    if pk == "" { http.Error(w, "private_key cannot be empty", 400); return }
+                    norm, err := normalizeRealityKey32(pk)
+                    if err != nil { http.Error(w, "invalid private_key: expect base64url 32 bytes", 400); return }
+                    t.PrivKey = norm
+                    if b, err := base64.RawURLEncoding.DecodeString(norm); err == nil && len(b) == 32 {
+                        if sk, err := ecdh.X25519().NewPrivateKey(b); err == nil {
+                            pub := sk.PublicKey().Bytes()
+                            t.Handshake.PublicKey = base64.RawURLEncoding.EncodeToString(pub)
                         }
                     }
                 }
+                // validate config after patch before applying
+                if err := s.validateTunnelConfig(t); err != nil { http.Error(w, err.Error(), 400); return }
                 t.UpdatedAt = time.Now()
                 if err := s.restartCore(); err != nil {
                     log.Printf("restart after tunnel patch failed: %v", err)
@@ -451,7 +590,6 @@ func (s *Server) routes() http.Handler {
                 PortalAddr: t.Portal,
                 Handshake:  t.Handshake,
                 Tunnels:    t.Entries,
-                Forward:    t.Forward,
                 Meta:       map[string]any{"tunnelId": t.ID, "name": t.Name, "createdAt": t.CreatedAt},
             }
             if err := params.Validate(); err != nil { http.Error(w, err.Error(), 400); return }
@@ -479,7 +617,7 @@ func (s *Server) routes() http.Handler {
         fmt.Fprintf(w, "<!doctype html><title>XRPS</title><h1>XRPS running</h1><p>APIs: /healthz, /api/tunnels, /logs/stream, /api/logs?type=access|error&tail=N, /logs/access/stream, /logs/error/stream</p>")
     })
 
-    return withCORS(mux)
+    return withCORS(s.secure(mux))
 }
 
 // handleLogStream streams the full file from the beginning, then follows new lines via SSEHub.
@@ -536,6 +674,48 @@ func writeJSON(w http.ResponseWriter, v any) {
     _ = enc.Encode(v)
 }
 
+// statsSnapshot returns cumulative inbound traffic per entry for active tunnel.
+func (s *Server) statsSnapshot() map[string]any {
+    now := time.Now().UnixMilli()
+    out := map[string]any{
+        "ts": now,
+        "tunnels": []map[string]any{},
+        "total": map[string]any{"uplink": int64(0), "downlink": int64(0), "total": int64(0)},
+    }
+    if s.orch == nil {
+        return out
+    }
+    tunnels := s.store.All()
+    if len(tunnels) == 0 {
+        return out
+    }
+    active := tunnels[0]
+    for _, t := range tunnels {
+        if t.UpdatedAt.After(active.UpdatedAt) { active = t }
+    }
+    var list []map[string]any
+    var sumUp, sumDown int64
+    for i, e := range active.Entries {
+        inbTag := fmt.Sprintf("t-inbound-%d", i+1)
+        var up, down int64
+        if v, ok := s.orch.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>uplink", inbTag)); ok { up += v }
+        if v, ok := s.orch.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>downlink", inbTag)); ok { down += v }
+        list = append(list, map[string]any{
+            "id": e.ID,
+            "tag": e.Tag,
+            "entry_port": e.EntryPort,
+            "uplink": up,
+            "downlink": down,
+            "total": up + down,
+        })
+        sumUp += up
+        sumDown += down
+    }
+    out["tunnels"] = list
+    out["total"] = map[string]any{"uplink": sumUp, "downlink": sumDown, "total": sumUp + sumDown}
+    return out
+}
+
 func withCORS(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -547,6 +727,85 @@ func withCORS(next http.Handler) http.Handler {
         }
         next.ServeHTTP(w, r)
     })
+}
+
+// secure wraps handlers with HTTP Basic Auth (admin/<password>), except for /healthz and OPTIONS.
+func (s *Server) secure(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.Method == http.MethodOptions || r.URL.Path == "/healthz" {
+            next.ServeHTTP(w, r)
+            return
+        }
+        // If no auth configured yet, allow (should not happen after init)
+        if s.authUser == "" || s.authHash == "" {
+            next.ServeHTTP(w, r)
+            return
+        }
+        user, pass, ok := r.BasicAuth()
+        if !ok || !s.checkPassword(user, pass) {
+            w.Header().Set("WWW-Authenticate", "Basic realm=\"XRPS\"")
+            http.Error(w, "unauthorized", http.StatusUnauthorized)
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
+}
+
+func (s *Server) checkPassword(user, pass string) bool {
+    if user != s.authUser { return false }
+    if s.authSalt == "" || s.authHash == "" { return false }
+    h := hashPassword(s.authSalt, pass)
+    if subtle.ConstantTimeCompare([]byte(h), []byte(s.authHash)) != 1 { return false }
+    return true
+}
+
+func hashPassword(salt, pass string) string {
+    sum := sha256.Sum256([]byte(salt + ":" + pass))
+    return hex.EncodeToString(sum[:])
+}
+
+func randomBase64URL(n int) string {
+    b := make([]byte, n)
+    _, _ = crand.Read(b)
+    return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// initAuth loads or creates admin credentials in ~/xrps/admin.auth.json
+func (s *Server) initAuth() error {
+    home, err := os.UserHomeDir()
+    if err != nil { return err }
+    dir := filepath.Join(home, "xrps")
+    if err := os.MkdirAll(dir, 0o755); err != nil { return err }
+    path := filepath.Join(dir, "admin.auth.json")
+    s.authPath = path
+    type authFile struct {
+        Username  string `json:"username"`
+        Salt      string `json:"salt"`
+        Hash      string `json:"hash"`
+        CreatedAt string `json:"createdAt"`
+    }
+    if _, err := os.Stat(path); os.IsNotExist(err) {
+        // first run: generate strong password and persist hash
+        user := "admin"
+        salt := randomHex(16)
+        pass := randomBase64URL(24)
+        h := hashPassword(salt, pass)
+        af := authFile{Username: user, Salt: salt, Hash: h, CreatedAt: time.Now().Format(time.RFC3339)}
+        b, _ := json.MarshalIndent(af, "", "  ")
+        _ = os.WriteFile(path, b, 0o600)
+        s.authUser, s.authSalt, s.authHash = user, salt, h
+        log.Printf("==== XRPS 初次运行创建管理员账户 ====")
+        log.Printf("用户名: admin  初始密码: %s", pass)
+        log.Printf("凭据文件: %s", path)
+        return nil
+    }
+    // load existing
+    b, err := os.ReadFile(path)
+    if err != nil { return err }
+    var af authFile
+    if err := json.Unmarshal(b, &af); err != nil { return err }
+    s.authUser, s.authSalt, s.authHash = af.Username, af.Salt, af.Hash
+    return nil
 }
 
 // logStartupSummary prints a concise startup summary to the console.
@@ -572,35 +831,35 @@ func (s *Server) logStartupSummary() {
 }
 
 // startCore starts embedded xray-core with the current generated config.
-// Set env XRPS_CORE_FAIL=true to simulate失败路径用于验证。
 func (s *Server) startCore() error {
     log.Printf("xray-core: starting…")
-    fail := os.Getenv("XRPS_CORE_FAIL")
-    if strings.EqualFold(fail, "1") || strings.EqualFold(fail, "true") || strings.EqualFold(fail, "yes") {
-        err := fmt.Errorf("simulated failure (XRPS_CORE_FAIL=%s)", fail)
-        log.Printf("xray-core: start failed: %v", err)
-        s.logs.Broadcast(fmt.Sprintf("{\"event\":\"core_failed\",\"reason\":\"startup\",\"ts\":%d}", time.Now().Unix()))
-        return err
-    }
     if s.orch == nil { s.orch = coreembed.New() }
-    runDir := os.Getenv("XRPS_XRAY_RUN_DIR")
-    if runDir == "" { runDir = s.logDir }
-    // Choose a free API port to avoid conflicts with user's xray
-    apiPort := getenvInt("XRPS_XRAY_API_PORT", 10085)
-    apiPort = chooseFreePort(apiPort)
-    // Build portal config from current tunnels; fallback to minimal when none/invalid
-    cfg, err := s.buildPortalConfig(apiPort)
+    // Store config under home directory: ~/xrp
+    var runDir string
+    if home, err := os.UserHomeDir(); err == nil {
+        runDir = filepath.Join(home, "xrp")
+    } else {
+        runDir = s.logDir
+    }
+    _ = os.MkdirAll(runDir, 0o755)
+    // Default config path
+    cfgPath := os.Getenv("XRPS_XRAY_CFG_PATH")
+    if cfgPath == "" { cfgPath = filepath.Join(runDir, "xray.portal.json") }
+    // Build portal config from current tunnels; on failure, try to reuse existing config file
+    cfg, err := s.buildPortalConfig()
     if err != nil {
-        log.Printf("xray-core: build portal config failed, using minimal: %v", err)
-        cfg = []byte(fmt.Sprintf(`{
+        // If there is an existing config file, reuse it
+        if b, rerr := os.ReadFile(cfgPath); rerr == nil {
+            log.Printf("xray-core: build failed, reusing existing config at %s: %v", cfgPath, err)
+            cfg = b
+        } else {
+            log.Printf("xray-core: build portal config failed, using minimal: %v", err)
+            cfg = []byte(fmt.Sprintf(`{
       "log": {"loglevel": "warning", "access": %q, "error": %q},
-      "inbounds": [
-        {"tag":"api","listen":"127.0.0.1","port":%d,"protocol":"dokodemo-door","settings":{"address":"127.0.0.1","port":1}}
-      ],
-      "outbounds": [
-        {"protocol": "blackhole", "tag":"blackhole"}
-      ]
-    }`, s.accessPath, s.errorPath, apiPort))
+      "outbounds": [{"protocol": "blackhole", "tag":"blackhole"}],
+      "routing": {"rules": []}
+    }`, s.accessPath, s.errorPath))
+        }
     }
     if p := os.Getenv("XRAY_CFG_PORTAL"); p != "" {
         if b, err := os.ReadFile(p); err == nil { cfg = b } else { log.Printf("xray-core: warn cannot read XRAY_CFG_PORTAL=%s: %v", p, err) }
@@ -608,8 +867,6 @@ func (s *Server) startCore() error {
     // Print effective config for debugging
     log.Printf("xray-core: effective portal config:\n%s", string(cfg))
     // Write debug copy
-    cfgPath := os.Getenv("XRPS_XRAY_CFG_PATH")
-    if cfgPath == "" { cfgPath = filepath.Join(runDir, "xray.portal.json") }
     _ = os.WriteFile(cfgPath, cfg, 0o644)
     if err := s.orch.StartJSON(cfg); err != nil {
         log.Printf("xray-core: start failed: %v", err)
@@ -618,6 +875,7 @@ func (s *Server) startCore() error {
     }
     log.Printf("xray-core: started (cfg=%s)", cfgPath)
     s.logs.Broadcast(fmt.Sprintf("{\"event\":\"core_started\",\"ts\":%d}", time.Now().Unix()))
+    s.startStatsMonitor()
     return nil
 }
 
@@ -625,43 +883,45 @@ func (s *Server) startCore() error {
 func (s *Server) restartCore() error {
     log.Printf("xray-core: restarting…")
     if s.orch == nil { s.orch = coreembed.New() }
-    runDir := os.Getenv("XRPS_XRAY_RUN_DIR")
-    if runDir == "" { runDir = s.logDir }
-    apiPort := getenvInt("XRPS_XRAY_API_PORT", 10085)
-    apiPort = chooseFreePort(apiPort)
-    // Build portal config from current tunnels; fallback to minimal when none/invalid
-    cfg, err := s.buildPortalConfig(apiPort)
+    // Store config under home directory: ~/xrp
+    var runDir string
+    if home, err := os.UserHomeDir(); err == nil { runDir = filepath.Join(home, "xrp") } else { runDir = s.logDir }
+    _ = os.MkdirAll(runDir, 0o755)
+    cfgPath := filepath.Join(runDir, "xray.portal.json")
+    // Build portal config from current tunnels; on failure, try to reuse existing config file
+    cfg, err := s.buildPortalConfig()
     if err != nil {
-        log.Printf("xray-core: build portal config failed, using minimal: %v", err)
-        cfg = []byte(fmt.Sprintf(`{
+        if b, rerr := os.ReadFile(cfgPath); rerr == nil {
+            log.Printf("xray-core: build failed, reusing existing config at %s: %v", cfgPath, err)
+            cfg = b
+        } else {
+            log.Printf("xray-core: build portal config failed, using minimal: %v", err)
+            cfg = []byte(fmt.Sprintf(`{
       "log": {"loglevel": "warning", "access": %q, "error": %q},
-      "inbounds": [
-        {"tag":"api","listen":"127.0.0.1","port":%d,"protocol":"dokodemo-door","settings":{"address":"127.0.0.1","port":1}}
-      ],
-      "outbounds": [
-        {"protocol": "blackhole", "tag":"blackhole"}
-      ]
-    }`, s.accessPath, s.errorPath, apiPort))
+      "outbounds": [{"protocol": "blackhole", "tag":"blackhole"}],
+      "routing": {"rules": []}
+    }`, s.accessPath, s.errorPath))
+        }
     }
     if p := os.Getenv("XRAY_CFG_PORTAL"); p != "" {
         if b, err := os.ReadFile(p); err == nil { cfg = b } else { log.Printf("xray-core: warn cannot read XRAY_CFG_PORTAL=%s: %v", p, err) }
     }
     // Print effective config for debugging on restart
     log.Printf("xray-core: effective portal config (restart):\n%s", string(cfg))
-    cfgPath := filepath.Join(runDir, "xray.portal.json")
     _ = os.WriteFile(cfgPath, cfg, 0o644)
     if err := s.orch.RestartJSON(cfg); err != nil {
         log.Printf("xray-core: restart failed: %v", err)
         return err
     }
     log.Printf("xray-core: restart ok")
+    s.startStatsMonitor()
     return nil
 }
 
 // buildPortalConfig constructs an xray JSON config reflecting current tunnels.
 // It follows PRD: VLESS+REALITY handshake inbound + per-entry tunnel inbounds
 // routed to dynamic reverse outbounds exposed via clients[].reverse.tag.
-func (s *Server) buildPortalConfig(apiPort int) ([]byte, error) {
+func (s *Server) buildPortalConfig() ([]byte, error) {
     // pick the most recently updated tunnel as the active profile
     tunnels := s.store.All()
     if len(tunnels) == 0 {
@@ -677,16 +937,7 @@ func (s *Server) buildPortalConfig(apiPort int) ([]byte, error) {
     // Prepare inbound: external-vless (handshake)
     clients := make([]map[string]any, 0, len(active.Entries))
     rules := make([]map[string]any, 0, len(active.Entries))
-    inbounds := make([]map[string]any, 0, 2+len(active.Entries))
-
-    // api inbound for local diagnostics (kept for parity with current behavior)
-    inbounds = append(inbounds, map[string]any{
-        "tag":     "api",
-        "listen":  "127.0.0.1",
-        "port":    apiPort,
-        "protocol": "dokodemo-door",
-        "settings": map[string]any{"address": "127.0.0.1", "port": 1},
-    })
+    inbounds := make([]map[string]any, 0, len(active.Entries)+1)
 
     for i, e := range active.Entries {
         idx := i + 1
@@ -721,16 +972,14 @@ func (s *Server) buildPortalConfig(apiPort int) ([]byte, error) {
         "protocol": "vless",
         "settings": map[string]any{
             "clients":    clients,
-            "decryption": "none",
+            // If PQ is configured, use stored decryption string; otherwise none
+            "decryption": func() string { if active.VLESSDec != "" && !strings.EqualFold(active.VLESSDec, "none") { return active.VLESSDec }; return "none" }(),
         },
     }
 
-    // Attach REALITY settings: prefer stored per-tunnel private key, fallback to env overrides
+    // Attach REALITY settings: require stored per-tunnel private key
     priv := active.PrivKey
-    if priv == "" {
-        priv = os.Getenv("XRPS_REALITY_PRIVATE_KEY")
-        if priv == "" { priv = os.Getenv("XRAY_REALITY_PRIVATE_KEY") }
-    }
+    if strings.TrimSpace(priv) == "" { return nil, fmt.Errorf("missing REALITY private_key") }
     if priv != "" {
         normPriv, err := normalizeRealityKey32(priv)
         if err != nil { return nil, fmt.Errorf("invalid REALITY privateKey: %w", err) }
@@ -748,16 +997,28 @@ func (s *Server) buildPortalConfig(apiPort int) ([]byte, error) {
     }
     inbounds = append(inbounds, vless)
 
+    // Add api/stats/policy so that counters are exposed.
     cfg := map[string]any{
         "log": map[string]any{"loglevel": "warning", "access": s.accessPath, "error": s.errorPath},
+        "api": map[string]any{"tag": "api", "services": []string{"HandlerService", "LoggerService", "StatsService"}},
+        "stats": map[string]any{},
+        "policy": map[string]any{
+            "levels": map[string]any{
+                "0": map[string]any{"statsUserUplink": true, "statsUserDownlink": true},
+            },
+            "system": map[string]any{
+                "statsInboundUplink": true,
+                "statsInboundDownlink": true,
+                "statsOutboundUplink": true,
+                "statsOutboundDownlink": true,
+            },
+        },
         "inbounds": inbounds,
         "outbounds": []map[string]any{
             {"tag": "direct", "protocol": "freedom"},
             {"tag": "blackhole", "protocol": "blackhole"},
         },
-        "routing": map[string]any{
-            "rules": rules,
-        },
+        "routing": map[string]any{"rules": rules},
     }
     b, err := json.MarshalIndent(cfg, "", "  ")
     if err != nil {
@@ -788,6 +1049,73 @@ func getenvInt(key string, def int) int {
     if v == "" { return def }
     if n, err := strconv.Atoi(v); err == nil { return n }
     return def
+}
+
+// serverListenPort parses the HTTP server listen address and returns its port.
+func serverListenPort(addr string) int {
+    addr = strings.TrimSpace(addr)
+    if addr == "" { return 0 }
+    if strings.HasPrefix(addr, ":") {
+        if n, err := strconv.Atoi(strings.TrimPrefix(addr, ":")); err == nil { return n }
+        return 0
+    }
+    if _, p, err := net.SplitHostPort(addr); err == nil {
+        if n, err := strconv.Atoi(p); err == nil { return n }
+    }
+    return 0
+}
+
+func hasDupInt(vals []int) (bool, int) {
+    seen := make(map[int]struct{}, len(vals))
+    for _, v := range vals {
+        if _, ok := seen[v]; ok { return true, v }
+        seen[v] = struct{}{}
+    }
+    return false, 0
+}
+
+// validateTunnelConfig performs config validation and local port conflict checks.
+func (s *Server) validateTunnelConfig(t *Tunnel) error {
+    if t == nil { return fmt.Errorf("nil tunnel") }
+    // basic fields
+    if strings.TrimSpace(t.Portal) == "" { return fmt.Errorf("portal_addr is required") }
+    if t.Handshake.Port <= 0 || t.Handshake.Port > 65535 { return fmt.Errorf("handshake_port must be 1-65535") }
+    if strings.TrimSpace(t.Handshake.ServerName) == "" { return fmt.Errorf("server_name is required") }
+    // require REALITY private key persisted per tunnel
+    if strings.TrimSpace(t.PrivKey) == "" { return fmt.Errorf("private_key is required") }
+    // encryption is sanitized elsewhere; ensure "pq" is not used
+    if strings.EqualFold(t.Handshake.Encryption, "pq") { return fmt.Errorf("encryption 'pq' is not supported") }
+    // shortId simple check (hex 8-32)
+    if sid := strings.TrimSpace(t.Handshake.ShortID); sid != "" {
+        if len(sid) < 8 || len(sid) > 32 { return fmt.Errorf("shortId length must be 8-32 hex digits") }
+        if _, err := hex.DecodeString(sid); err != nil { return fmt.Errorf("shortId must be hex") }
+    }
+    // validate private key format
+    if _, err := normalizeRealityKey32(t.PrivKey); err != nil { return fmt.Errorf("invalid private_key: %v", err) }
+    // publicKey is used by clients; if present ensure format
+    if strings.TrimSpace(t.Handshake.PublicKey) != "" {
+        if _, err := normalizeRealityKey32(t.Handshake.PublicKey); err != nil { return fmt.Errorf("invalid public_key: %v", err) }
+    }
+    if len(t.Entries) == 0 { return fmt.Errorf("at least one entry port is required") }
+    // gather ports
+    httpPort := serverListenPort(s.addr)
+    ports := make([]int, 0, 1+len(t.Entries))
+    ports = append(ports, t.Handshake.Port)
+    for _, e := range t.Entries {
+        if e.EntryPort <= 0 || e.EntryPort > 65535 { return fmt.Errorf("entry_port %d must be 1-65535", e.EntryPort) }
+        ports = append(ports, e.EntryPort)
+    }
+    if dup, v := hasDupInt(ports); dup {
+        return fmt.Errorf("port conflict: port %d appears multiple times (handshake/entries)", v)
+    }
+    // ensure none equals the HTTP server port
+    if httpPort > 0 {
+        for _, p := range ports {
+            if p == httpPort { return fmt.Errorf("port %d conflicts with XRPS HTTP server port", p) }
+        }
+    }
+    // forward-proxy removed
+    return nil
 }
 
 func main() {
@@ -828,6 +1156,10 @@ func main() {
     }()
 
     s.logStartupSummary()
+    // init admin auth
+    if err := s.initAuth(); err != nil {
+        log.Printf("auth init failed: %v", err)
+    }
     // Attempt to start (placeholder) core; log success/failure to console
     if err := s.startCore(); err != nil {
         log.Printf("warning: xray-core not running: %v", err)

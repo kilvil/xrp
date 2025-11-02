@@ -1,6 +1,6 @@
 module xrp
 
-go 1.25
+go 1.25.3
 
 require github.com/xtls/xray-core v1.251015.0
 

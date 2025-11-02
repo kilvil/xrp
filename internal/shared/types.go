@@ -23,24 +23,12 @@ type TunnelEntry struct {
     MapPortHint int    `json:"map_port_hint"` // suggested mapping on client
 }
 
-// ForwardConfig is optional forward proxy over portal (e.g., local socks → portal:443)
-type ForwardConfig struct {
-    Enabled    bool   `json:"enabled"`
-    Port       int    `json:"port"`
-    ID         string `json:"id"`
-    ServerName string `json:"serverName"`
-    PublicKey  string `json:"publicKey"`
-    ShortID    string `json:"shortId"`
-    Flow       string `json:"flow"`
-}
-
 // ConnectionParams is the portable profile copied from XRPS to XRPC (Base64(JSON))
 type ConnectionParams struct {
     Version    int              `json:"version"`
     PortalAddr string           `json:"portal_addr"`
     Handshake  HandshakeConfig  `json:"handshake"`
     Tunnels    []TunnelEntry    `json:"tunnels"`
-    Forward    ForwardConfig    `json:"forward"`
     Meta       map[string]any   `json:"meta,omitempty"`
 }
 

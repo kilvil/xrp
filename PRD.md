@@ -43,7 +43,7 @@ XRP 是一个基于 Xray 的反向代理管理工具，包含：
 
 部署形态：
 - XRPS：在公网主机上以 systemd 服务运行（监听面板端口与 xray 监听端口）。
-- XRPC：在内网主机上以 systemd 服务运行（可选启用本地 SOCKS5 正向代理）。
+- XRPC：在内网主机上以 systemd 服务运行（正向代理功能已移除）。
 
 ## 5. 功能清单
 
@@ -61,9 +61,9 @@ XRPS（服务器/Portal）
 - 安全：管理员账户、Token、二次校验（可选）；审计日志（配置变更与运维操作）。
 
 XRPC（客户端/Bridge）
-- 首次引导：粘贴 Base64 连接参数（或扫码），解析后展示摘要，确认后应用；
+- 首次引导：粘贴 Base64 连接参数（或扫码），解析后展示摘要，确认后应用；应用后需在前端为每条隧道手动输入/确认出口地址（默认 127.0.0.1:80）。
 - 连接管理：连接/断开/重连、自动重连（指数退避 + 抖动）、当前状态；
-- 目标映射：为每条隧道设置“目标地址 target（ip:port）”，默认 127.0.0.1:mapPort（mapPort 默认从 80 递增，或按参数提示），可随时调整并热更新；
+- 目标映射：为每条隧道设置“目标地址 target（ip:port）”，可随时调整并热更新（XRPS 不再提供默认映射端口提示）。
 - 日志/状态：实时查看 xray 日志、最近重连原因、当前速率与累计流量；
 - 多配置档：保存多组连接参数，手动启停；
 - 运行控制：启动/停止/重启 Core、配置校验、端口冲突检测。
@@ -82,14 +82,14 @@ XRPS（Portal 侧，按隧道集合动态生成/变更）
 XRPC（Bridge 侧，粘贴参数后生成）
 - Inbounds：
   - `r-inbound-{i}`（由 reverse 链路在 Bridge 端生成的入口 tag）。
-  - 可选 `socks-in`（127.0.0.1:10808），用于本机正向代理经 Portal“正向”出站（如配置了 forward）。
+  - （已移除）`socks-in`/正向代理相关能力。
 - Outbounds：
   - `rev-link-{i}`（VLESS+REALITY，直连 XRPS 的 Handshake 端口，`reverse.tag="r-inbound-{i}"`）。
   - `local-web-{i}`（freedom，`redirect=127.0.0.1:<映射端口>`）。
-  - 可选 `proxy`（正向上网出站，连接 XRPS 的“正向”VLESS+REALITY）。
+  - （已移除）`proxy`（正向上网出站）。
 - Routing：
   - `inboundTag=["r-inbound-{i}"] -> outboundTag="local-web-{i}"`。
-  - 若启用本地 SOCKS：`inboundTag=["socks-in"] -> outboundTag="proxy"`。
+  - （已移除）本地 SOCKS → proxy 出站路由。
 
 说明：REALITY 采用 `flow=xtls-rprx-vision`，`decryption=none`（服务端 inbound），客户端 outbound “encryption” 支持 PQ 与 X25519 两档；`fingerprint=chrome`。
 
@@ -97,7 +97,7 @@ XRPC（Bridge 侧，粘贴参数后生成）
 
 编码：`base64url(JSON)`（无换行，无前缀），UI 提供复制/二维码。建议在 UI/文档中统一称“验证密钥”。
 
-示例（v1）：
+示例（v1，无正向代理）：
 ```json
 {
   "version": 1,
@@ -111,18 +111,9 @@ XRPC（Bridge 侧，粘贴参数后生成）
     "flow": "xtls-rprx-vision"
   },
   "tunnels": [
-    { "entry_port": 31234, "id": "<uuid-1>", "tag": "t1", "map_port_hint": 80 },
-    { "entry_port": 31235, "id": "<uuid-2>", "tag": "t2", "map_port_hint": 81 }
-  ],
-  "forward": {                          
-    "enabled": false,
-    "port": 443,
-    "id": "<uuid-forward>",
-    "serverName": "www.sky.com",
-    "publicKey": "<reality_public_key_forward>",
-    "shortId": "<short_id_forward>",
-    "flow": "xtls-rprx-vision"
-  },
+    { "entry_port": 31234, "id": "<uuid-1>", "tag": "t1", "map_port_hint": 0 },
+    { "entry_port": 31235, "id": "<uuid-2>", "tag": "t2", "map_port_hint": 0 }
+  ]
   "meta": { "comment": "demo", "createdAt": "2025-01-01T00:00:00Z" }
 }
 ```
