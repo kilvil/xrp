@@ -143,6 +143,8 @@ Two production-ready images can be built locally with multi-stage Dockerfiles.
   - 2 卸载 XRPS
   - 3 安装 XRPC
   - 4 卸载 XRPC
+  - 5 重置 XRPS 管理员密码
+  - 6 重置 XRPC 管理员密码
 
 - 说明：
   - 仅支持 Linux；需要 `curl`/`wget` 与 `tar`。
@@ -152,6 +154,7 @@ Two production-ready images can be built locally with multi-stage Dockerfiles.
   - 脚本会输出面板地址（`/ui/`），并调用 `xrps -reset-admin` / `xrpc -reset-admin` 生成随机管理员密码。
     - systemd 场景下会自动重启服务以加载新密码。
     - 命令也会把凭据写入 `/var/lib/xrps` / `/var/lib/xrpc`（或自定义的 `*_STATE_DIR`）。
+  - 也可在菜单中选择“重置管理员密码”单独重置（会尝试重启对应 systemd 服务并打印新密码与凭据文件路径）。
     - 非首次启动无法找回旧密码（仅存储哈希）。如需重置，可再次执行上述命令或删除对应目录下的 `admin.auth.json` 后重新启动。
     - 使用 systemd 安装时，服务里注入了 `XRPS_STATE_DIR=/var/lib/xrps` / `XRPC_STATE_DIR=/var/lib/xrpc`，确保无 HOME 时也能持久化鉴权信息。
     - 如需自定义存储目录，可编辑 systemd 单元或在前台运行前导出对应环境变量。

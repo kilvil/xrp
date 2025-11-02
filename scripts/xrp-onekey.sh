@@ -337,6 +337,41 @@ uninstall_binary() {
   echo "${name} uninstalled."
 }
 
+reset_menu_action() {
+  local name="$1"
+  local bin="${INSTALL_DIR}/${name}"
+  if [[ ! -x "$bin" ]]; then
+    echo "未找到二进制：$bin，请先安装 $name。" >&2
+    return 1
+  fi
+  local port
+  port=$(default_port_for "$name")
+  print_panel_urls "$name" "$port"
+  echo "重置管理员密码..."
+  if reset_admin_credentials "$name"; then
+    if command -v systemctl >/dev/null 2>&1; then
+      local sp
+      sp=$(sudo_prefix)
+      echo "尝试重启 ${name} 服务以应用新密码..."
+      set +e
+      $sp systemctl restart "$name"
+      set -e
+    fi
+    local cred_file="$RESET_FILE"
+    if [[ -z "$cred_file" ]]; then
+      cred_file="/var/lib/${name}/admin.auth.json"
+    fi
+    echo "管理员凭据："
+    echo "  用户名：admin"
+    echo "  新密码：$RESET_PASS"
+    echo "  凭据文件：$cred_file"
+    return 0
+  else
+    echo "重置失败。你可以手动运行：${bin} -reset-admin" >&2
+    return 1
+  fi
+}
+
 menu() {
   cat <<'EOF'
 ================ XRP One-key ================
@@ -344,7 +379,9 @@ menu() {
 2) 卸载 XRPS
 3) 安装 XRPC (Linux)
 4) 卸载 XRPC
-5) 退出
+5) 重置 XRPS 管理员密码
+6) 重置 XRPC 管理员密码
+7) 退出
 ============================================
 EOF
 }
@@ -356,13 +393,15 @@ main() {
 
   while true; do
     menu
-    read -r -p "请选择 [1-5]: " choice || exit 0
+    read -r -p "请选择 [1-7]: " choice || exit 0
     case "$choice" in
       1) download_and_install xrps ;;
       2) uninstall_binary xrps ;;
       3) download_and_install xrpc ;;
       4) uninstall_binary xrpc ;;
-      5) echo "Bye."; exit 0 ;;
+      5) reset_menu_action xrps ;;
+      6) reset_menu_action xrpc ;;
+      7) echo "Bye."; exit 0 ;;
       *) echo "无效选择，请重试。" ;;
     esac
   done
