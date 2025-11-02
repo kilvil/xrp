@@ -97,6 +97,25 @@ See scripts:
 
 These copy binaries to `/usr/local/bin` and create simple systemd units.
 
+## 一键脚本（Linux）
+
+- 在线运行（从 GitHub 拉取并用 bash 执行）：
+  - `bash <(curl -fsSL https://raw.githubusercontent.com/kilvil/xrp/master/scripts/xrp-onekey.sh)`
+  - 或 `curl -fsSL https://raw.githubusercontent.com/kilvil/xrp/master/scripts/xrp-onekey.sh | bash`
+
+- 功能菜单（数字选择）：
+  - 1 安装 XRPS
+  - 2 卸载 XRPS
+  - 3 安装 XRPC
+  - 4 卸载 XRPC
+
+- 说明：
+  - 仅支持 Linux；需要 `curl`/`wget` 与 `tar`。
+  - 默认安装目录为 `/usr/local/bin`，需要写入权限（自动使用 `sudo`）。
+  - 脚本会自动解析 GitHub 最新 Release，下载匹配架构的二进制（amd64/arm64）。
+  - 安装后可选择是否创建并启动 systemd 服务（可选）。
+  - 卸载会尝试停止/禁用并移除同名 systemd 服务，然后删除二进制。
+
 ## Next steps
 
 - Integrate xray-core: construct `core.Config` inside the process; add reverse v4, REALITY and tunnel routing per PRD.

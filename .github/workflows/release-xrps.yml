@@ -89,6 +89,13 @@ jobs:
             (cd artifacts && sha256sum "${ARTIFACT}.tar.gz" > "${ARTIFACT}.tar.gz.sha256")
           fi
 
+      - name: Add one-click installer script
+        if: steps.onmaster.outputs.ok == 'true' && matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          set -euxo pipefail
+          cp scripts/xrp-onekey.sh artifacts/
+          (cd artifacts && sha256sum xrp-onekey.sh > xrp-onekey.sh.sha256)
+
       - name: Publish GitHub Release assets
         if: steps.onmaster.outputs.ok == 'true' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
