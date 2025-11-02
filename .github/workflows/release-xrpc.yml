@@ -53,7 +53,8 @@ jobs:
         run: |
           set -euxo pipefail
           corepack enable
-          corepack prepare pnpm@8 --activate
+          corepack prepare pnpm@9 --activate
+          pnpm -v
 
       - name: Build XRPC Web UI
         if: steps.onmaster.outputs.ok == 'true'
