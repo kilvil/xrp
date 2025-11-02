@@ -47,9 +47,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'pnpm'
-          cache-dependency-path: |
-            xrpc/web/pnpm-lock.yaml
 
       - name: Enable corepack + pnpm
         if: steps.onmaster.outputs.ok == 'true'
