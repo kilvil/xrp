@@ -1,0 +1,20 @@
+# build caches
+.gocache
+.gocache2
+.gopath
+
+# vcs and local bins
+.git
+bin
+logs
+
+# node/web (if present)
+node_modules
+web/**/node_modules
+web/**/dist
+
+# editor/OS
+*.swp
+*.DS_Store
+*.idea
+.vscode

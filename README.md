@@ -97,6 +97,28 @@ See scripts:
 
 These copy binaries to `/usr/local/bin` and create simple systemd units.
 
+## Docker
+
+Two production-ready images can be built locally with multi-stage Dockerfiles.
+
+- Build images and start with compose:
+  - `cd deploy && docker compose up -d --build`
+  - XRPS at `http://localhost:8080`, XRPC at `http://localhost:8081`
+  - First run creates admin credentials under the container home directory and prints the generated password in logs.
+
+- Files persisted (via volumes in `deploy/docker-compose.yml`):
+  - XRPS: `~/xrps/admin.auth.json`, `~/xrp/xray.portal.json`
+  - XRPC: `~/xrpc/admin.auth.json`, `~/xrp/xray.bridge.json`
+
+- Environment variables (commonly used):
+  - `XRPS_LOG_DIR` / `XRPC_LOG_DIR`: container log directory (default `/logs` in images)
+  - `XRAY_LOCATION_ASSET`: optional path for geo assets if needed by custom rules
+  - `XRAY_CFG_PORTAL` / `XRAY_CFG_BRIDGE`: point to an external JSON to override generated configs (debug)
+  - `XRPS_UI_DIR` / `XRPC_UI_DIR`: mount a built UI dir and serve at `/ui/`
+
+- Ports for tunnels on XRPS:
+  - The compose file only publishes the API/UI port (`8080`). Handshake (`handshake_port`) and tunnel `entry_ports` are decided by your XRPS tunnel config. To expose them, add static mappings under the `ports:` section in compose (examples are commented in the file). Alternatively use host networking if you prefer dynamic ports.
+
 ## 一键脚本（Linux）
 
 - 在线运行（从 GitHub 拉取并用 bash 执行）：
@@ -114,6 +136,10 @@ These copy binaries to `/usr/local/bin` and create simple systemd units.
   - 默认安装目录为 `/usr/local/bin`，需要写入权限（自动使用 `sudo`）。
   - 脚本会自动解析 GitHub 最新 Release，下载匹配架构的二进制（amd64/arm64）。
   - 安装后可选择是否创建并启动 systemd 服务（可选）。
+  - 脚本会输出面板地址（`/ui/`）并尝试抓取“首次启动”日志中的管理员账号密码（admin/随机密码）。
+    - 使用 systemd 启动时，脚本会从 `journalctl -u xrps|xrpc` 中抓取包含“初始密码”的日志行。
+    - 未用 systemd 时，可选择临时启动一次以生成并显示初始密码。
+    - 非首次启动无法找回旧密码（仅存储哈希）；如需重置，请删除 `~/xrps/admin.auth.json` 或 `~/xrpc/admin.auth.json` 后重新启动生成新密码。
   - 卸载会尝试停止/禁用并移除同名 systemd 服务，然后删除二进制。
 
 ## Next steps
