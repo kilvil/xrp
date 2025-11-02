@@ -51,13 +51,18 @@ jobs:
           cache-dependency-path: |
             xrps/web/pnpm-lock.yaml
 
+      - name: Enable corepack + pnpm
+        if: steps.onmaster.outputs.ok == 'true'
+        run: |
+          set -euxo pipefail
+          corepack enable
+          corepack prepare pnpm@8 --activate
+
       - name: Build XRPS Web UI
         if: steps.onmaster.outputs.ok == 'true'
         run: |
           set -euxo pipefail
           cd xrps/web
-          corepack enable
-          corepack prepare pnpm@8 --activate || true
           pnpm install --frozen-lockfile
           pnpm build
 
@@ -92,4 +97,3 @@ jobs:
             artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
