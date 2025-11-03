@@ -1,4 +1,4 @@
-name: Release XRPS
+name: Release XRP
 
 on:
   push:
@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   build-release:
-    name: Build and publish XRPS
+    name: Build and publish XRP
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -60,15 +60,18 @@ jobs:
           corepack prepare pnpm@9 --activate
           pnpm -v
 
-      - name: Build XRPS Web UI
+      - name: Build Web UI
         if: steps.onmaster.outputs.ok == 'true'
         run: |
           set -euxo pipefail
-          cd xrps/web
+          cd web
           pnpm install --frozen-lockfile
           pnpm build
+          cd ..
+          rm -rf src/ui && mkdir -p src/ui
+          cp -r web/dist/* src/ui/
 
-      - name: Build XRPS binary (-tags ui_embed)
+      - name: Build XRP binary (-tags ui_embed)
         if: steps.onmaster.outputs.ok == 'true'
         env:
           GOOS: ${{ matrix.goos }}
@@ -79,13 +82,13 @@ jobs:
           mkdir -p build artifacts
           EXT=""
           if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
-          go build -tags ui_embed -trimpath -ldflags "-s -w" -o "build/xrps${EXT}" ./xrps
-          ARTIFACT="xrps_${GITHUB_REF_NAME}_${GOOS}_${GOARCH}"
+          go build -tags ui_embed -trimpath -ldflags "-s -w" -o "build/xrp${EXT}" ./src
+          ARTIFACT="xrp_${GITHUB_REF_NAME}_${GOOS}_${GOARCH}"
           if [ "$GOOS" = "windows" ]; then
-            (cd build && zip -9 "../artifacts/${ARTIFACT}.zip" "xrps${EXT}")
+            (cd build && zip -9 "../artifacts/${ARTIFACT}.zip" "xrp${EXT}")
             (cd artifacts && sha256sum "${ARTIFACT}.zip" > "${ARTIFACT}.zip.sha256")
           else
-            tar -C build -czf "artifacts/${ARTIFACT}.tar.gz" "xrps${EXT}"
+            tar -C build -czf "artifacts/${ARTIFACT}.tar.gz" "xrp${EXT}"
             (cd artifacts && sha256sum "${ARTIFACT}.tar.gz" > "${ARTIFACT}.tar.gz.sha256")
           fi
 

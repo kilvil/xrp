@@ -1,0 +1,38 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Global thin, minimal scrollbars */
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(100, 116, 139, 0.6) transparent; /* slate-500 */
+}
+.dark * {
+  scrollbar-color: rgba(71, 85, 105, 0.9) transparent; /* slate-600 */
+}
+
+/* WebKit (Chrome, Edge, Safari) */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: rgba(100, 116, 139, 0.5); /* slate-500 */
+  border-radius: 9999px;
+  border: 2px solid transparent; /* creates padding gap */
+  background-clip: padding-box;
+}
+.dark *::-webkit-scrollbar-thumb {
+  background-color: rgba(71, 85, 105, 0.85); /* slate-600 */
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(100, 116, 139, 0.7);
+}
+.dark *::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(71, 85, 105, 1);
+}
+

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# One-click installer for XRPS/XRPC on Linux
-# - Installs or uninstalls binaries from the latest GitHub release
-# - Optionally creates/removes simple systemd services
+# One-click installer for XRP (merged) on Linux
+# - Installs or uninstalls the single unified xrp binary from the latest GitHub release
+# - Optionally creates/removes simple systemd service
 
 set -euo pipefail
 
@@ -44,13 +44,7 @@ detect_arch() {
   esac
 }
 
-default_port_for() {
-  case "$1" in
-    xrps) echo 8080 ;;
-    xrpc) echo 8081 ;;
-    *) echo 0 ;;
-  esac
-}
+default_port_for() { echo 8080; }
 
 detect_server_ip() {
   if command -v ip >/dev/null 2>&1; then
@@ -70,8 +64,9 @@ print_panel_urls() {
   local name="$1" port="$2" ip
   ip=$(detect_server_ip)
   echo "面板地址："
-  echo "  http://$ip:$port/ui/"
-  echo "  http://127.0.0.1:$port/ui/"
+  echo "  http://$ip:$port/"
+  echo "  http://127.0.0.1:$port/"
+  echo "  兼容路径: http://$ip:$port/ui/"
 }
 
 parse_pass_from_lines() {
@@ -281,12 +276,7 @@ maybe_setup_systemd() {
 
 create_systemd_unit() {
   local name="$1"
-  local svc_port
-  case "$name" in
-    xrps) svc_port=8080 ;;
-    xrpc) svc_port=8081 ;;
-    *) svc_port=0 ;;
-  esac
+  local svc_port=8080
   local unit_dir="/etc/systemd/system"
   local unit_file="$unit_dir/${name}.service"
   local sp
@@ -296,13 +286,15 @@ create_systemd_unit() {
   $sp mkdir -p "$unit_dir"
   $sp tee "$unit_file" >/dev/null <<UNIT
 [Unit]
-Description=${name^^} Service
+Description=XRP unified service
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=${INSTALL_DIR}/${name} ${svc_port:+-addr :$svc_port}
-Environment=${name^^}_STATE_DIR=/var/lib/${name}
+ExecStart=${INSTALL_DIR}/${name} -addr :$svc_port
+Environment=XRP_STATE_DIR=/var/lib/xrp
+Environment=XRP_LOG_DIR=/var/lib/xrp
+Environment=XRP_XRAY_CFG_PATH=/var/lib/xrp/xray.unified.json
 Restart=on-failure
 RestartSec=2
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -375,13 +367,10 @@ reset_menu_action() {
 menu() {
   cat <<'EOF'
 ================ XRP One-key ================
-1) 安装 XRPS (Linux)
-2) 卸载 XRPS
-3) 安装 XRPC (Linux)
-4) 卸载 XRPC
-5) 重置 XRPS 管理员密码
-6) 重置 XRPC 管理员密码
-7) 退出
+1) 安装 XRP (Linux)
+2) 卸载 XRP
+3) 重置 XRP 管理员密码
+4) 退出
 ============================================
 EOF
 }
@@ -393,15 +382,12 @@ main() {
 
   while true; do
     menu
-    read -r -p "请选择 [1-7]: " choice || exit 0
+    read -r -p "请选择 [1-4]: " choice || exit 0
     case "$choice" in
-      1) download_and_install xrps ;;
-      2) uninstall_binary xrps ;;
-      3) download_and_install xrpc ;;
-      4) uninstall_binary xrpc ;;
-      5) reset_menu_action xrps ;;
-      6) reset_menu_action xrpc ;;
-      7) echo "Bye."; exit 0 ;;
+      1) download_and_install xrp ;;
+      2) uninstall_binary xrp ;;
+      3) reset_menu_action xrp ;;
+      4) echo "Bye."; exit 0 ;;
       *) echo "无效选择，请重试。" ;;
     esac
   done

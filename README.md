@@ -1,77 +1,77 @@
-# XRP Monorepo (XRPS + XRPC)
+# XRP（统一版：Inbound + Outbound）
 
-This repo contains two services to manage Xray reverse proxying:
+XRP 将原 XRPS（Portal/Server）与 XRPC（Bridge/Client）合并为一个进程 + 一个前端。
 
-- `xrps` (server/portal): create and manage reverse tunnels; generate Base64 connection params for clients. XRPS only defines how to connect to the server (portal addr, REALITY handshake, entry ports). It does not decide the forwarding destination.
-- `xrpc` (client/bridge): paste Base64 params to connect; shows status, logs and reconnection events. XRPC decides each tunnel’s forwarding target `ip:port` (default `127.0.0.1:80`, or `127.0.0.1:mapPort` when a hint is provided) and can change it at runtime.
+- Inbound（原 XRPS 功能）：创建握手/入口（REALITY + Entry Ports），生成给客户端使用的 Base64 参数。
+- Outbound（原 XRPC 功能）：粘贴 Base64 参数后建立反连，按隧道设置本地转发表达式（target / map_port / active）。
 
-Note: xray-core is now embedded in-process by default. Services build an Xray JSON config (REALITY + Reverse v4) and start a core instance internally, writing `./logs/*.log` for access/error and exposing restart endpoints. You can still point to an external config via `XRAY_CFG_PORTAL`/`XRAY_CFG_BRIDGE` for debugging.
+内置 xray-core：后端会在进程内构建 Xray JSON（REALITY + Reverse v4 + stats/policy）并启动核心，默认写入 `./logs/access.log`、`./logs/error.log`。也可以通过环境变量使用外部配置。
 
-## Quick start
+## 快速开始
 
-- Run XRPS (server):
-  - `go run ./xrps -addr :8080`
-  - Health: `GET /healthz`
-  - REALITY helpers (keys use base64url without padding):
-    - `GET /api/reality/x25519` → `{ privateKey, publicKey }` (base64)
-  - Create tunnel: `POST /api/tunnels` (see payload below)
-  - Generate params: `POST /api/tunnels/{id}/connection-params`
-  - System events (SSE): `GET /logs/stream`
-  - Xray file logs:
-    - Tail: `GET /api/logs?type=access|error&tail=200` (tail<=0 returns full file)
-    - Streams: `GET /logs/access/stream`, `GET /logs/error/stream` (stream starts from file head, then follows)
-    - Configure log dir via env `XRPS_LOG_DIR` (default `./logs`)
+- 后端（统一版）
+  - 开发运行：`make run`（等价 `go run ./src -addr :8080`）
+  - 健康检查：`GET /healthz`
+  - 状态：`GET /status`
+  - 管理员凭据：首次启动自动生成（日志打印），或执行 `go run ./src -reset-admin`
 
-- Run XRPC (client):
-  - `go run ./xrpc -addr :8081`
-  - Health: `GET /healthz`
-  - REALITY helpers (mirror, base64url): `GET /api/reality/x25519`, `GET /api/reality/mldsa65`
-  - Apply profile: `POST /api/profile/apply` with `{ "base64": "..." }` or raw Base64 body
-  - List tunnels: `GET /api/tunnels` (with target field)
-  - Update per-tunnel: `PATCH /api/tunnels/{id}` with `{ map_port?, active?, target? }`
-  - Status: `GET /status`
-  - System events (SSE): `GET /logs/stream`
-  - Xray file logs:
-    - Tail: `GET /api/logs?type=access|error&tail=200` (tail<=0 returns full file)
-    - Streams: `GET /logs/access/stream`, `GET /logs/error/stream` (stream starts from file head, then follows)
-    - Configure log dir via env `XRPC_LOG_DIR` (default `./logs`)
+- 前端（Vite + React）
+  - `cd web && npm install && npm run dev`（http://localhost:5173，已代理到 :8080）
+  - 在 UI 右上角输入 admin/密码（Basic Auth）
+  - 也可构建静态资源：`npm run build`，然后设置 `XRP_UI_DIR=web/dist` 后端会在 `/ui/` 提供静态页面
 
-Core control (placeholder until xray-core embed is wired):
-- Restart: `POST /api/core/restart` (both XRPS and XRPC)
+## API 概览（统一版）
 
-Xray integration
-- Embedded core: requires Go to fetch `github.com/xtls/xray-core`. Set `XRAY_LOCATION_ASSET` (or per-service `XRPS_XRAY_ASSET`/`XRPC_XRAY_ASSET`) if you need custom geo files. REALITY keys must be base64url (no padding).
+- Inbound（隧道入口，原 XRPS）
+  - `GET/POST /api/inbound/tunnels`
+  - `GET/PATCH/DELETE /api/inbound/tunnels/:id`
+  - `POST /api/inbound/tunnels/:id/connection-params`
+  - 统计：`GET /api/inbound/stats/snapshot`、`GET /api/inbound/stats/range?since=...&entry=...`
 
-Encryption policy
-- XRPS API 不接受 `encryption: "pq"`。请使用 `"none"`（Vision）或完整 PQ 串（以 `mlkem768x25519plus.` 开头）。
-- Optional config overrides:
-  - XRPS reads `XRAY_CFG_PORTAL` (path to JSON). If set, XRPS uses this file instead of generated config and writes a copy to `xray.portal.json` in run dir.
-  - XRPC reads `XRAY_CFG_BRIDGE` (path to JSON). If set, XRPC uses this file and writes a copy to `xray.bridge.json` in run dir.
+- Outbound（反向连接，原 XRPC）
+  - `POST /api/outbound/profile/apply`（Content-Type: text/plain 或 application/json {"base64": "..."}）
+  - `GET /api/outbound/tunnels`
+  - `GET/PATCH/DELETE /api/outbound/tunnels/:id`
+  - 统计：`GET /api/outbound/stats/snapshot`、`GET /api/outbound/stats/range?since=...&tunnel=...`
+
+- 日志与 WS
+  - SSE：`GET /logs/stream`、`/logs/access/stream`、`/logs/error/stream`
+  - Tail：`GET /api/logs?type=access|error&tail=200`
+  - WS 实时速率：`/ws/stats`（消息包含 role=portal|bridge）
+
+- REALITY/VLESS 辅助
+  - `GET /api/reality/x25519` → `{ publicKey, privateKey }`（base64url）
+  - `GET /api/vlessenc?algo=pq|x25519&seconds=600` → 生成 decryption/encryption 串
+
+加密策略
+- Inbound 接口不接受 `encryption: "pq"` 的简写。请使用 `"none"`（Vision）或完整 PQ 串（以 `mlkem768x25519plus.` 开头）。
+  
+可选配置覆盖（调试）
+- 统一调试配置输出：`$HOME/xrp/xray.unified.json`（或 `XRP_XRAY_CFG_PATH` 指定路径）
+- 若设置 `XRP_XRAY_CFG_PATH` 指向一个 JSON 文件，后端将优先使用该文件内容启动核心，并把有效配置写回该路径便于检查。
   
 
-Run directories and ports
- - XRPS writes its effective config to `~/xrp/xray.portal.json`. On startup, if there are no tunnels loaded and this file exists, XRPS will reuse it instead of generating a minimal config. You can still override with `XRAY_CFG_PORTAL`.
- - XRPC writes its effective config to `~/xrp/xray.bridge.json`. On startup, if no profile is applied and this file exists, XRPC will reuse it instead of generating a minimal config. You can still override with `XRAY_CFG_BRIDGE`.
- - Runtime persistence（面板数据持久化）:
-   - XRPS：隧道列表会保存到 `/var/lib/xrps/tunnels.json`（可通过 `XRPS_STATE_DIR` 自定义目录）。服务启动时会自动读取到内存，所以重启后面板仍能显示之前已创建的隧道。
-   - XRPC：最近一次应用的 Profile 会保存到 `/var/lib/xrpc/profile.json`，每个隧道的本地状态（Map 端口、Target、Active）会保存到 `/var/lib/xrpc/tunnel_states.json`（可通过 `XRPC_STATE_DIR` 自定义目录）。服务启动时会自动加载并回填到面板。
- - Admin auth storage:
-  - XRPS: 默认 `/var/lib/xrps/admin.auth.json`，可通过 `XRPS_STATE_DIR` 自定义。
-  - XRPC: 默认 `/var/lib/xrpc/admin.auth.json`，可通过 `XRPC_STATE_DIR` 自定义。
-  - 首次启动会生成 admin/随机密码并写入上述路径，同时将密码打印到日志。
+运行目录与持久化
+- 有效配置（调试副本）：`$HOME/xrp/xray.unified.json`（或 `XRP_XRAY_CFG_PATH`）
+- 日志目录：`XRP_LOG_DIR`（默认 `./logs`），文件 `access.log`、`error.log`
+- 面板数据（持久化）：
+  - Inbound 隧道列表：`$XRP_STATE_DIR/portal/tunnels.json`（默认 `./state/xrps/tunnels.json`）
+  - Outbound Profile：`$XRP_STATE_DIR/bridge/profile.json`（默认 `./state/xrpc/profile.json`）
+  - Outbound 隧道状态：`$XRP_STATE_DIR/bridge/tunnel_states.json`
+- 管理员凭据：`$XRP_STATE_DIR/admin.auth.json`（首次启动会生成 admin/随机密码并打印到日志）
 
 ## 管理员密码
 
-- 重置 XRPS 管理员密码：`xrps -reset-admin`
-- 重置 XRPC 管理员密码：`xrpc -reset-admin`
-- 命令会写入 `/var/lib/xrps` / `/var/lib/xrpc`（或你通过 `*_STATE_DIR` 设置的目录），并在标准输出打印新密码。
-- 若进程已在运行，请在重置后执行 `systemctl restart xrps` / `systemctl restart xrpc` 让新凭据生效。
+- 重置管理员密码：
+  - 开发：`go run ./src -reset-admin`
+  - 二进制：`bin/xrp -reset-admin`
+- 凭据写入 `$XRP_STATE_DIR/admin.auth.json`，并在标准输出打印新密码。
 Tips
 - In dev, you can simulate log streaming by appending lines to `./logs/access.log` or `./logs/error.log`; the SSE endpoints will push new lines.
 
-### Create tunnel (XRPS)
+### 创建 Inbound 隧道
 
-POST `/api/tunnels`
+POST `/api/inbound/tunnels`
 
 ```
 {
@@ -84,7 +84,7 @@ POST `/api/tunnels`
 }
 ```
 
-Then `POST /api/tunnels/{id}/connection-params` returns:
+随后 `POST /api/inbound/tunnels/{id}/connection-params` 返回：
 
 ```
 {
@@ -93,72 +93,28 @@ Then `POST /api/tunnels/{id}/connection-params` returns:
 }
 ```
 
-Paste that Base64 into XRPC via `POST /api/profile/apply`.
+将 Base64 粘贴到 Outbound：`POST /api/outbound/profile/apply`。
 
-## Build
+## 构建
 
-- Root module: `go 1.21`. External runtime dep: xray binary (provided via `XRAY_BIN`).
-- Build binaries:
-  - `go build -o bin/xrps ./xrps`
-  - `go build -o bin/xrpc ./xrpc`
+- 后端：`make build`（输出 `bin/xrp`）或 `go build -o bin/xrp ./src`
+- 前端：`cd web && npm run build`（生成 `web/dist`，后端通过 `XRP_UI_DIR=web/dist` 提供 `/ui/`）
 
-## Install (systemd, optional)
+## 部署（可选 systemd/Docker）
 
-See scripts:
-- `scripts/install_xrps.sh`
-- `scripts/install_xrpc.sh`
-
-These copy binaries to `/usr/local/bin` and create simple systemd units.
+- systemd：暂未更新一键脚本到统一版，可参考二进制启动参数与环境变量自定义单元。
 
 ## Docker
 
-Two production-ready images can be built locally with multi-stage Dockerfiles.
+- 统一镜像与 compose 尚未更新到合并版；你可以参考 `make build` 产物将 `bin/xrp` 和 `web/dist` 放入镜像，并通过以下环境变量控制：
+  - `XRP_UI_DIR`：静态 UI 目录（如 `/ui`）
+  - `XRP_STATE_DIR`：状态存储（profile/tunnels/admin）
+  - `XRP_LOG_DIR`：日志落盘目录
+  - `XRP_XRAY_CFG_PATH`：调试时写入/读取的统一配置路径
 
-- Build images and start with compose:
-  - `cd deploy && docker compose up -d --build`
-  - XRPS at `http://localhost:8080`, XRPC at `http://localhost:8081`
-  - First run creates admin credentials under the container home directory and prints the generated password in logs.
+## 一键脚本（暂未更新）
 
-- Files persisted (via volumes in `deploy/docker-compose.yml`):
-  - XRPS: `/home/app/xrps/admin.auth.json`, `~/xrp/xray.portal.json`
-  - XRPC: `/home/app/xrpc/admin.auth.json`, `~/xrp/xray.bridge.json`
-
-- Environment variables (commonly used):
-  - `XRPS_LOG_DIR` / `XRPC_LOG_DIR`: container log directory (default `/logs` in images)
-  - `XRAY_LOCATION_ASSET`: optional path for geo assets if needed by custom rules
-  - `XRAY_CFG_PORTAL` / `XRAY_CFG_BRIDGE`: point to an external JSON to override generated configs (debug)
-  - `XRPS_UI_DIR` / `XRPC_UI_DIR`: mount a built UI dir and serve at `/ui/`
-
-- Ports for tunnels on XRPS:
-  - The compose file only publishes the API/UI port (`8080`). Handshake (`handshake_port`) and tunnel `entry_ports` are decided by your XRPS tunnel config. To expose them, add static mappings under the `ports:` section in compose (examples are commented in the file). Alternatively use host networking if you prefer dynamic ports.
-
-## 一键脚本（Linux）
-
-- 在线运行（从 GitHub 拉取并用 bash 执行）：
-  - `bash <(curl -fsSL https://raw.githubusercontent.com/kilvil/xrp/master/scripts/xrp-onekey.sh)`
-  - 或 `curl -fsSL https://raw.githubusercontent.com/kilvil/xrp/master/scripts/xrp-onekey.sh | bash`
-
-- 功能菜单（数字选择）：
-  - 1 安装 XRPS
-  - 2 卸载 XRPS
-  - 3 安装 XRPC
-  - 4 卸载 XRPC
-  - 5 重置 XRPS 管理员密码
-  - 6 重置 XRPC 管理员密码
-
-- 说明：
-  - 仅支持 Linux；需要 `curl`/`wget` 与 `tar`。
-  - 默认安装目录为 `/usr/local/bin`，需要写入权限（自动使用 `sudo`）。
-  - 脚本会自动解析 GitHub 最新 Release，下载匹配架构的二进制（amd64/arm64）。
-  - 安装后可选择是否创建并启动 systemd 服务（可选）。
-  - 脚本会输出面板地址（`/ui/`），并调用 `xrps -reset-admin` / `xrpc -reset-admin` 生成随机管理员密码。
-    - systemd 场景下会自动重启服务以加载新密码。
-    - 命令也会把凭据写入 `/var/lib/xrps` / `/var/lib/xrpc`（或自定义的 `*_STATE_DIR`）。
-  - 也可在菜单中选择“重置管理员密码”单独重置（会尝试重启对应 systemd 服务并打印新密码与凭据文件路径）。
-    - 非首次启动无法找回旧密码（仅存储哈希）。如需重置，可再次执行上述命令或删除对应目录下的 `admin.auth.json` 后重新启动。
-    - 使用 systemd 安装时，服务里注入了 `XRPS_STATE_DIR=/var/lib/xrps` / `XRPC_STATE_DIR=/var/lib/xrpc`，确保无 HOME 时也能持久化鉴权信息。
-    - 如需自定义存储目录，可编辑 systemd 单元或在前台运行前导出对应环境变量。
-  - 卸载会尝试停止/禁用并移除同名 systemd 服务，然后删除二进制。
+历史脚本仍指向分离版 XRPS/XRPC。合并版发布后会提供新的安装脚本与 compose 示例。
 
 ## Next steps
 
