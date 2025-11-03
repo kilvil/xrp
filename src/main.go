@@ -94,18 +94,9 @@ func b64url32(s string) (string, error) {
     return "", errors.New("expect 32-byte base64url")
 }
 
-// unified state dir: XRP_STATE_DIR/{portal,bridge}
+// unified state dir: always under /var/lib/xrp/{portal,bridge}
 func stateDir(role string) string {
-    if v := strings.TrimSpace(os.Getenv("XRP_STATE_DIR")); v != "" {
-        return filepath.Join(v, role)
-    }
-    // fallback legacy
-    if role == "portal" {
-        if v := strings.TrimSpace(os.Getenv("XRPS_STATE_DIR")); v != "" { return v }
-        return "./state/xrps"
-    }
-    if v := strings.TrimSpace(os.Getenv("XRPC_STATE_DIR")); v != "" { return v }
-    return "./state/xrpc"
+    return filepath.Join("/", "var", "lib", "xrp", role)
 }
 
 // ===== Persistence =====
@@ -192,28 +183,19 @@ func newApp(addr string) *app {
 }
 
 // ensureLogDir sets up the log directory and file tailers.
-// Default is /var/lib/xrp, with an override via XRP_LOG_DIR.
-// Filenames remain access.log and error.log.
+// Location is fixed to /var/lib/xrp; files: access.log and error.log.
 func (a *app) ensureLogDir() {
-    dir := strings.TrimSpace(os.Getenv("XRP_LOG_DIR"))
-    if dir == "" {
-        dir = filepath.Join("/var/lib", "xrp")
-    }
+    dir := filepath.Join("/var/lib", "xrp")
+    // Always target /var/lib/xrp; best-effort create
     if err := os.MkdirAll(dir, 0o755); err != nil {
-        // fallback to local ./logs for dev environments without permissions
-        dir = "./logs"
-        _ = os.MkdirAll(dir, 0o755)
+        log.Printf("warn: cannot create %s: %v", dir, err)
     }
     a.logDir = dir
     a.accessPath = filepath.Join(dir, "access.log")
     a.errorPath = filepath.Join(dir, "error.log")
     // ensure files exist
-    if _, err := os.Stat(a.accessPath); os.IsNotExist(err) {
-        _ = os.WriteFile(a.accessPath, []byte(""), 0o644)
-    }
-    if _, err := os.Stat(a.errorPath); os.IsNotExist(err) {
-        _ = os.WriteFile(a.errorPath, []byte(""), 0o644)
-    }
+    if _, err := os.Stat(a.accessPath); os.IsNotExist(err) { _ = os.WriteFile(a.accessPath, []byte(""), 0o644) }
+    if _, err := os.Stat(a.errorPath); os.IsNotExist(err) { _ = os.WriteFile(a.errorPath, []byte(""), 0o644) }
     // start tailers
     a.tailAccess = shared.NewFileTailer(a.accessPath, 1*time.Second)
     a.tailError = shared.NewFileTailer(a.errorPath, 1*time.Second)
@@ -276,17 +258,17 @@ func (a *app) routes() {
         })
     })
 
-    // UI: prefer external dir via XRP_UI_DIR, else embedded assets when built with -tags ui_embed.
-    if dir := strings.TrimSpace(os.Getenv("XRP_UI_DIR")); dir != "" {
-        if st, err := os.Stat(dir); err == nil && st.IsDir() {
-            h := spaFileServer(http.Dir(dir))
-            mux.Handle("/", h)
-            mux.Handle("/ui/", http.StripPrefix("/ui/", h))
-        }
-    } else if hfs := getEmbeddedUI(); hfs != nil {
+    // UI: serve embedded assets when built with -tags ui_embed.
+    if hfs := getEmbeddedUI(); hfs != nil {
         h := spaFileServer(hfs)
         mux.Handle("/", h)
-        mux.Handle("/ui/", http.StripPrefix("/ui/", h))
+    } else {
+        // No embedded UI; expose a minimal root for clarity
+        mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+            w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+            w.WriteHeader(200)
+            _, _ = w.Write([]byte("XRP API is running. Build with -tags ui_embed to serve UI."))
+        })
     }
 
     // Logs + SSE + WS
@@ -598,7 +580,7 @@ func main() {
 
     if *resetAdmin {
         a := &app{}
-        pass, err := a.resetAdminCredentials(filepath.Join(strings.TrimSpace(os.Getenv("XRP_STATE_DIR")), "admin.auth.json"))
+        pass, err := a.resetAdminCredentials(a.ensureCredsPath())
         if err != nil { log.Fatalf("reset admin failed: %v", err) }
         fmt.Printf("XRP admin password reset.\nUsername: admin\nPassword: %s\nFile: %s\n", pass, a.authPath)
         return
@@ -726,12 +708,7 @@ func randomBase64URL(n int) string { b := make([]byte, n); _, _ = crand.Read(b);
 func randomHex(n int) string { b := make([]byte, n); _, _ = crand.Read(b); return hex.EncodeToString(b) }
 
 func (a *app) resetAdminCredentials(path string) (string, error) {
-    if path == "" {
-        dir := strings.TrimSpace(os.Getenv("XRP_STATE_DIR"))
-        if dir == "" { dir = "./state" }
-        _ = os.MkdirAll(dir, 0o755)
-        path = filepath.Join(dir, "admin.auth.json")
-    }
+    if path == "" { path = a.ensureCredsPath() }
     if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { return "", err }
     user := "admin"; salt := randomHex(16); pass := randomBase64URL(24); hash := hashPassword(salt, pass)
     af := map[string]string{"username": user, "salt": salt, "hash": hash, "createdAt": time.Now().Format(time.RFC3339)}
@@ -742,10 +719,7 @@ func (a *app) resetAdminCredentials(path string) (string, error) {
 }
 
 func (a *app) initAuth() error {
-    dir := strings.TrimSpace(os.Getenv("XRP_STATE_DIR"))
-    if dir == "" { dir = "./state" }
-    if err := os.MkdirAll(dir, 0o755); err != nil { return err }
-    path := filepath.Join(dir, "admin.auth.json")
+    path := a.ensureCredsPath()
     a.authPath = path
     if _, err := os.Stat(path); os.IsNotExist(err) {
         pass, err := a.resetAdminCredentials(path); if err != nil { return err }
@@ -759,6 +733,15 @@ func (a *app) initAuth() error {
     if err := json.Unmarshal(b, &af); err != nil { return err }
     a.authUser, a.authSalt, a.authHash = af.Username, af.Salt, af.Hash
     return nil
+}
+
+// ensureCredsPath returns the fixed admin credentials path under /etc/lib/xrp.
+// This follows the requirement that credentials must always persist under /etc/lib.
+func (a *app) ensureCredsPath() string {
+    p := filepath.Join("/","etc","lib","xrp","admin.auth.json")
+    // best-effort create parent dir; errors handled by callers when writing
+    _ = os.MkdirAll(filepath.Dir(p), 0o755)
+    return p
 }
 
 func withCORS(next http.Handler) http.Handler {
@@ -862,23 +845,9 @@ func (a *app) buildUnifiedConfig() ([]byte, error) {
 // ensureCfgPath determines the config file path, creates parent directory if needed, and remembers it.
 func (a *app) ensureCfgPath() string {
     if a.cfgPath != "" { return a.cfgPath }
-    // Order: env override -> /var/lib/xrp/xray.unified.json (preferred) -> fallback to logs dir
-    if p := strings.TrimSpace(os.Getenv("XRP_XRAY_CFG_PATH")); p != "" {
-        _ = os.MkdirAll(filepath.Dir(p), 0o755)
-        a.cfgPath = p
-        return a.cfgPath
-    }
-    // preferred system path
     p := filepath.Join("/var/lib", "xrp", "xray.unified.json")
-    if err := os.MkdirAll(filepath.Dir(p), 0o755); err == nil {
-        a.cfgPath = p
-        return a.cfgPath
-    }
-    // fallback: user home or log dir
-    var runDir string
-    if home, err := os.UserHomeDir(); err == nil { runDir = filepath.Join(home, "xrp") } else { runDir = a.logDir }
-    _ = os.MkdirAll(runDir, 0o755)
-    a.cfgPath = filepath.Join(runDir, "xray.unified.json")
+    _ = os.MkdirAll(filepath.Dir(p), 0o755)
+    a.cfgPath = p
     return a.cfgPath
 }
 

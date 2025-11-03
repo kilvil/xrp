@@ -66,7 +66,6 @@ print_panel_urls() {
   echo "面板地址："
   echo "  http://$ip:$port/"
   echo "  http://127.0.0.1:$port/"
-  echo "  兼容路径: http://$ip:$port/ui/"
 }
 
 parse_pass_from_lines() {
@@ -159,7 +158,7 @@ post_install_info() {
     fi
     local cred_file="$RESET_FILE"
     if [[ -z "$cred_file" ]]; then
-      cred_file="/var/lib/${name}/admin.auth.json"
+      cred_file="/etc/lib/${name}/admin.auth.json"
     fi
     echo "管理员凭据："
     echo "  用户名：admin"
@@ -292,9 +291,6 @@ Wants=network-online.target
 
 [Service]
 ExecStart=${INSTALL_DIR}/${name} -addr :$svc_port
-Environment=XRP_STATE_DIR=/var/lib/xrp
-Environment=XRP_LOG_DIR=/var/lib/xrp
-Environment=XRP_XRAY_CFG_PATH=/var/lib/xrp/xray.unified.json
 Restart=on-failure
 RestartSec=2
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -351,7 +347,7 @@ reset_menu_action() {
     fi
     local cred_file="$RESET_FILE"
     if [[ -z "$cred_file" ]]; then
-      cred_file="/var/lib/${name}/admin.auth.json"
+      cred_file="/etc/lib/${name}/admin.auth.json"
     fi
     echo "管理员凭据："
     echo "  用户名：admin"

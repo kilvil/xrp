@@ -5,7 +5,7 @@ XRP 将原 XRPS（Portal/Server）与 XRPC（Bridge/Client）合并为一个进�
 - Inbound（原 XRPS 功能）：创建握手/入口（REALITY + Entry Ports），生成给客户端使用的 Base64 参数。
 - Outbound（原 XRPC 功能）：粘贴 Base64 参数后建立反连，按隧道设置本地转发表达式（target / map_port / active）。
 
-内置 xray-core：后端会在进程内构建 Xray JSON（REALITY + Reverse v4 + stats/policy）并启动核心，默认写入 `./logs/access.log`、`./logs/error.log`。也可以通过环境变量使用外部配置。
+内置 xray-core：后端会在进程内构建 Xray JSON（REALITY + Reverse v4 + stats/policy）并启动核心，默认写入 `/var/lib/xrp/access.log`、`/var/lib/xrp/error.log`。也可以通过环境变量使用外部配置。
 
 ## 快速开始
 
@@ -16,9 +16,11 @@ XRP 将原 XRPS（Portal/Server）与 XRPC（Bridge/Client）合并为一个进�
   - 管理员凭据：首次启动自动生成（日志打印），或执行 `go run ./src -reset-admin`
 
 - 前端（Vite + React）
-  - `cd web && npm install && npm run dev`（http://localhost:5173，已代理到 :8080）
-  - 在 UI 右上角输入 admin/密码（Basic Auth）
-  - 也可构建静态资源：`npm run build`，然后设置 `XRP_UI_DIR=web/dist` 后端会在 `/ui/` 提供静态页面
+  - 开发：`cd web && npm install && npm run dev`（http://localhost:5173，已代理到 :8080）
+  - 生产：先构建前端 `npm run build`，再将 `web/dist` 复制到 `src/ui` 并使用 `-tags ui_embed` 构建后端以将 UI 打包进二进制：
+    - `cd web && npm run build`
+    - `rm -rf ../src/ui && mkdir -p ../src/ui && cp -a dist/* ../src/ui/`
+    - `GOCACHE="$PWD/../.gocache" go build -tags ui_embed -o ../bin/xrp ../src`
 
 ## API 概览（统一版）
 
@@ -47,25 +49,24 @@ XRP 将原 XRPS（Portal/Server）与 XRPC（Bridge/Client）合并为一个进�
 - Inbound 接口不接受 `encryption: "pq"` 的简写。请使用 `"none"`（Vision）或完整 PQ 串（以 `mlkem768x25519plus.` 开头）。
   
 可选配置覆盖（调试）
-- 统一调试配置输出：`$HOME/xrp/xray.unified.json`（或 `XRP_XRAY_CFG_PATH` 指定路径）
-- 若设置 `XRP_XRAY_CFG_PATH` 指向一个 JSON 文件，后端将优先使用该文件内容启动核心，并把有效配置写回该路径便于检查。
+- 无（路径固定）。
   
 
-运行目录与持久化
-- 有效配置（调试副本）：`$HOME/xrp/xray.unified.json`（或 `XRP_XRAY_CFG_PATH`）
-- 日志目录：`XRP_LOG_DIR`（默认 `./logs`），文件 `access.log`、`error.log`
-- 面板数据（持久化）：
-  - Inbound 隧道列表：`$XRP_STATE_DIR/portal/tunnels.json`（默认 `./state/xrps/tunnels.json`）
-  - Outbound Profile：`$XRP_STATE_DIR/bridge/profile.json`（默认 `./state/xrpc/profile.json`）
-  - Outbound 隧道状态：`$XRP_STATE_DIR/bridge/tunnel_states.json`
-- 管理员凭据：`$XRP_STATE_DIR/admin.auth.json`（首次启动会生成 admin/随机密码并打印到日志）
+- 运行目录与持久化（固定路径）
+- 有效配置：`/var/lib/xrp/xray.unified.json`
+- 日志目录：`/var/lib/xrp`，文件 `access.log`、`error.log`
+- 面板数据：
+  - Inbound 隧道列表：`/var/lib/xrp/portal/tunnels.json`
+  - Outbound Profile：`/var/lib/xrp/bridge/profile.json`
+  - Outbound 隧道状态：`/var/lib/xrp/bridge/tunnel_states.json`
+- 管理员凭据：固定写入 `/etc/lib/xrp/admin.auth.json`（首次启动会生成 admin/随机密码并打印到日志）
 
 ## 管理员密码
 
 - 重置管理员密码：
   - 开发：`go run ./src -reset-admin`
   - 二进制：`bin/xrp -reset-admin`
-- 凭据写入 `$XRP_STATE_DIR/admin.auth.json`，并在标准输出打印新密码。
+- 凭据写入固定路径：`/etc/lib/xrp/admin.auth.json`，并在标准输出打印新密码。
 Tips
 - In dev, you can simulate log streaming by appending lines to `./logs/access.log` or `./logs/error.log`; the SSE endpoints will push new lines.
 
@@ -98,23 +99,45 @@ POST `/api/inbound/tunnels`
 ## 构建
 
 - 后端：`make build`（输出 `bin/xrp`）或 `go build -o bin/xrp ./src`
-- 前端：`cd web && npm run build`（生成 `web/dist`，后端通过 `XRP_UI_DIR=web/dist` 提供 `/ui/`）
+- 前端：`cd web && npm run build`（生成 `web/dist`，用于内嵌到二进制）
 
-## 部署（可选 systemd/Docker）
+## 一键安装脚本（XRP 合并版）
 
-- systemd：暂未更新一键脚本到统一版，可参考二进制启动参数与环境变量自定义单元。
+Linux 一键安装、卸载与重置（交互式菜单）。推荐使用最新发布页的脚本：
+
+```
+curl -fsSL https://github.com/kilvil/xrp/releases/latest/download/xrp-onekey.sh -o xrp-onekey.sh
+chmod +x xrp-onekey.sh
+./xrp-onekey.sh
+```
+
+或直接使用仓库脚本（可能不是发布版，请自行判断）：
+
+```
+bash <(curl -fsSL https://raw.githubusercontent.com/kilvil/xrp/master/scripts/xrp-onekey.sh)
+```
+
+菜单项：
+- 1) 安装 XRP（下载 `xrp_<tag>_linux_<arch>.*`，安装到 `/usr/local/bin/xrp`，可选创建 systemd 服务）
+- 2) 卸载 XRP（停止并移除 systemd，删除二进制）
+- 3) 重置 XRP 管理员密码（更新 `/etc/lib/xrp/admin.auth.json` 并打印新密码）
+- 4) 退出
+
+systemd 单元关键设置（由脚本创建）：
+- ExecStart: `/usr/local/bin/xrp -addr :8080`
+
+安装后面板地址：
+- `http://<服务器IP>:8080/`
 
 ## Docker
 
-- 统一镜像与 compose 尚未更新到合并版；你可以参考 `make build` 产物将 `bin/xrp` 和 `web/dist` 放入镜像，并通过以下环境变量控制：
-  - `XRP_UI_DIR`：静态 UI 目录（如 `/ui`）
-  - `XRP_STATE_DIR`：状态存储（profile/tunnels/admin）
-  - `XRP_LOG_DIR`：日志落盘目录
-  - `XRP_XRAY_CFG_PATH`：调试时写入/读取的统一配置路径
+- 统一镜像与 compose 尚未更新到合并版；建议将 `/var/lib/xrp` 和 `/etc/lib/xrp` 作为卷挂载以持久化配置、日志与凭据。前端建议内置到二进制（`-tags ui_embed`）。
 
-## 一键脚本（暂未更新）
+## 手动运行（不使用脚本）
 
-历史脚本仍指向分离版 XRPS/XRPC。合并版发布后会提供新的安装脚本与 compose 示例。
+```
+bin/xrp -addr :8080
+```
 
 ## Next steps
 
@@ -124,6 +147,4 @@ POST `/api/inbound/tunnels`
 ### Web UI (React + Vite)
 
 - Dev servers are under `web/xrps` and `web/xrpc`. See `web/README.md`.
-- Optional: after building (`pnpm build`) you can serve the static UI from the Go services:
-  - XRPS: set env `XRPS_UI_DIR=web/xrps/dist` then run `go run ./xrps`; UI at `http://localhost:8080/ui/`.
-  - XRPC: set env `XRPC_UI_DIR=web/xrpc/dist` then run `go run ./xrpc`; UI at `http://localhost:8081/ui/`.
+- Optional: legacy split UIs are documented under `legacy/` for reference only.
