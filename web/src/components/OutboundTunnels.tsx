@@ -27,6 +27,11 @@ export default function OutboundTunnels() {
     }
   }, [])
   React.useEffect(() => { load() }, [load])
+  // auto-refresh list periodically to reflect live connection status
+  React.useEffect(() => {
+    const id = setInterval(() => { load().catch(() => {}) }, 5000)
+    return () => clearInterval(id)
+  }, [load])
 
   const onDelete = async (id: string) => { await API.outbound.deleteTunnel(id); await load() }
   const onEditTarget = async (it: OutboundTunnelState) => {
@@ -57,10 +62,13 @@ export default function OutboundTunnels() {
           <div key={it.id} className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm text-slate-900 dark:bg-slate-900 dark:text-slate-100 dark:border-slate-800">
             <div className="flex items-center justify-between">
               <div className="font-medium">{it.tag}</div>
-              <span className={
-                'text-xs px-2 py-0.5 rounded-full ring-1 ring-inset ' +
-                (it.status === 'connected' ? 'bg-green-50 text-green-700 ring-green-600/20' : 'bg-slate-100 text-slate-700 ring-slate-600/20')
-              }>{it.status}</span>
+              {(() => {
+                const st = it.status || 'unknown'
+                const cls = st === 'connected'
+                  ? 'bg-green-50 text-green-700 ring-green-600/20'
+                  : 'bg-slate-100 text-slate-700 ring-slate-600/20'
+                return <span className={'text-xs px-2 py-0.5 rounded-full ring-1 ring-inset ' + cls}>{st}</span>
+              })()}
             </div>
             <div className="mt-2 grid grid-cols-2 gap-1 text-sm">
               <div>
@@ -135,4 +143,3 @@ export default function OutboundTunnels() {
     </div>
   )
 }
-

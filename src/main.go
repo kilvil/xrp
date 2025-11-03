@@ -16,8 +16,8 @@ import (
 	"io"
 	"log"
 
-	// "math/rand"
-	// "net"
+    // "math/rand"
+    "net"
 	"net/http"
 	neturl "net/url"
 	"os"
@@ -203,14 +203,16 @@ type app struct {
 	// stats buffers (bridge)
 	bStatsMu        sync.Mutex
 	bStatsTotal     []statsPoint
-	bStatsPerTunnel map[string][]statsPoint
-	// monitors stop chans
-	pMonStop chan struct{}
-	bMonStop chan struct{}
+    bStatsPerTunnel map[string][]statsPoint
+    // monitors stop chans
+    pMonStop chan struct{}
+    bMonStop chan struct{}
+    // bridge connectivity tracking
+    bLastInc map[string]time.Time
 }
 
 func newApp(addr string) *app {
-	a := &app{addr: addr, mux: http.NewServeMux(), portal: newPortalStore(), bridge: newBridgeState(), logs: shared.NewSSEHub(), access: shared.NewSSEHub(), errors: shared.NewSSEHub(), start: time.Now()}
+    a := &app{addr: addr, mux: http.NewServeMux(), portal: newPortalStore(), bridge: newBridgeState(), logs: shared.NewSSEHub(), access: shared.NewSSEHub(), errors: shared.NewSSEHub(), start: time.Now(), bLastInc: make(map[string]time.Time)}
 	// initialize logs directory and tailers
 	a.ensureLogDir()
 	// auth
@@ -793,13 +795,18 @@ func (a *app) routes() {
 
 // bridge helpers
 func (b *bridgeState) listStates() []TunnelState {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	out := make([]TunnelState, 0, len(b.tunnels))
-	for _, st := range b.tunnels {
-		out = append(out, *st)
-	}
-	return out
+    b.mu.RLock()
+    defer b.mu.RUnlock()
+    out := make([]TunnelState, 0, len(b.tunnels))
+    for _, st := range b.tunnels {
+        v := *st
+        if strings.TrimSpace(v.Status) == "" {
+            // default to disconnected when unknown
+            v.Status = "disconnected"
+        }
+        out = append(out, v)
+    }
+    return out
 }
 func (b *bridgeState) getState(id string) (TunnelState, bool) {
 	b.mu.RLock()
@@ -851,10 +858,10 @@ func (b *bridgeState) deleteState(id string) bool {
 // ===== main =====
 
 func main() {
-	addr := flag.String("addr", ":8080", "listen address")
-	resetAdmin := flag.Bool("reset-admin", false, "reset admin password and exit")
-	flag.Parse()
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+    addr := flag.String("addr", "", "listen address (default random high port)")
+    resetAdmin := flag.Bool("reset-admin", false, "reset admin password and exit")
+    flag.Parse()
+    log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
 	if *resetAdmin {
 		a := &app{}
@@ -866,13 +873,25 @@ func main() {
 		return
 	}
 
-	app := newApp(*addr)
-	srv := &http.Server{Addr: *addr, Handler: app.mux}
-	log.Printf("xrp unified server listening on %s", *addr)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("server error: %v", err)
-	}
-	_ = srv.Shutdown(context.Background())
+    // Choose random high port by default
+    bind := strings.TrimSpace(*addr)
+    if bind == "" {
+        bind = ":0"
+    }
+    // Build app before serving
+    app := newApp(bind)
+    // Listen explicitly so we can print the chosen port when using :0
+    ln, err := net.Listen("tcp", bind)
+    if err != nil {
+        log.Fatalf("listen failed on %s: %v", bind, err)
+    }
+    actual := ln.Addr().String()
+    srv := &http.Server{Addr: actual, Handler: app.mux}
+    log.Printf("xrp unified server listening on %s", actual)
+    if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+        log.Fatalf("server error: %v", err)
+    }
+    _ = srv.Shutdown(context.Background())
 }
 
 // ===== Logs helpers =====
@@ -1666,51 +1685,85 @@ func (a *app) restartBridgeMonitor() {
 	}
 	stop := make(chan struct{})
 	a.bMonStop = stop
-	go func() {
-		prevPer := make(map[string]struct{ up, down int64 })
-		var prevTs int64
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ticker.C:
-				if a.orch == nil {
-					continue
-				}
-				a.bridge.mu.RLock()
-				p := a.bridge.params
-				a.bridge.mu.RUnlock()
-				if p == nil {
-					continue
-				}
-				ts := time.Now().UnixMilli()
-				per := make(map[string]struct{ up, down int64 })
-				for i, t := range p.Tunnels {
-					revTag := fmt.Sprintf("rev-link-%d", i)
-					inbTag := fmt.Sprintf("r-inbound-%d", i)
-					up, down := int64(0), int64(0)
-					if v, ok := a.orch.GetCounter(fmt.Sprintf("outbound>>>%s>>>traffic>>>uplink", revTag)); ok {
-						up += v
-					}
-					if v, ok := a.orch.GetCounter(fmt.Sprintf("outbound>>>%s>>>traffic>>>downlink", revTag)); ok {
-						down += v
-					}
-					if v, ok := a.orch.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>uplink", inbTag)); ok {
-						up += v
-					}
-					if v, ok := a.orch.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>downlink", inbTag)); ok {
-						down += v
-					}
-					per[t.ID] = struct{ up, down int64 }{up: up, down: down}
-				}
-				a.recordBridgeStats(ts, per)
-				if a.wsStats != nil && prevTs > 0 {
-					dt := ts - prevTs
-					if dt > 0 {
-						type item struct {
-							ID, Tag                      string
+    go func() {
+        prevPer := make(map[string]struct{ up, down int64 })
+        var prevTs int64
+        ticker := time.NewTicker(2 * time.Second)
+        defer ticker.Stop()
+        for {
+            select {
+            case <-stop:
+                return
+            case <-ticker.C:
+                if a.orch == nil {
+                    continue
+                }
+                a.bridge.mu.RLock()
+                p := a.bridge.params
+                a.bridge.mu.RUnlock()
+                if p == nil {
+                    continue
+                }
+                ts := time.Now().UnixMilli()
+                per := make(map[string]struct{ up, down int64 })
+                for i, t := range p.Tunnels {
+                    revTag := fmt.Sprintf("rev-link-%d", i)
+                    inbTag := fmt.Sprintf("r-inbound-%d", i)
+                    up, down := int64(0), int64(0)
+                    if v, ok := a.orch.GetCounter(fmt.Sprintf("outbound>>>%s>>>traffic>>>uplink", revTag)); ok {
+                        up += v
+                    }
+                    if v, ok := a.orch.GetCounter(fmt.Sprintf("outbound>>>%s>>>traffic>>>downlink", revTag)); ok {
+                        down += v
+                    }
+                    if v, ok := a.orch.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>uplink", inbTag)); ok {
+                        up += v
+                    }
+                    if v, ok := a.orch.GetCounter(fmt.Sprintf("inbound>>>%s>>>traffic>>>downlink", inbTag)); ok {
+                        down += v
+                    }
+                    per[t.ID] = struct{ up, down int64 }{up: up, down: down}
+                }
+                // Update connectivity status per tunnel based on counter growth
+                now := time.Now()
+                for _, t := range p.Tunnels {
+                    cur := per[t.ID]
+                    prv := prevPer[t.ID]
+                    curSum := cur.up + cur.down
+                    prvSum := prv.up + prv.down
+                    a.bridge.mu.Lock()
+                    st := a.bridge.tunnels[t.ID]
+                    if st == nil {
+                        a.bridge.mu.Unlock()
+                        continue
+                    }
+                    if curSum > prvSum {
+                        a.bLastInc[t.ID] = now
+                        if st.Status != "connected" {
+                            st.Status = "connected"
+                        }
+                    } else {
+                        if last, ok := a.bLastInc[t.ID]; ok {
+                            if now.Sub(last) > 15*time.Second {
+                                if st.Status != "disconnected" {
+                                    st.Status = "disconnected"
+                                }
+                            }
+                        } else {
+                            // first observation: mark unknown as disconnected
+                            if strings.TrimSpace(st.Status) == "" {
+                                st.Status = "disconnected"
+                            }
+                        }
+                    }
+                    a.bridge.mu.Unlock()
+                }
+                a.recordBridgeStats(ts, per)
+                if a.wsStats != nil && prevTs > 0 {
+                    dt := ts - prevTs
+                    if dt > 0 {
+                        type item struct {
+                            ID, Tag                      string
 							EntryPort                    int
 							Up, Down, BytesUp, BytesDown int64
 						}
