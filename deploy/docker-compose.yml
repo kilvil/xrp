@@ -9,8 +9,6 @@ services:
     container_name: xrps
     restart: unless-stopped
     environment:
-      # 可选：静态资源目录（若你用前端构建产物挂载到容器）
-      # - XRPS_UI_DIR=/ui
       - XRPS_LOG_DIR=/logs
       - XRPS_STATE_DIR=/home/app/xrps
       - HOME=/home/app
@@ -23,10 +21,8 @@ services:
       - xrps-data:/home/app
       # 可选：持久化日志
       - xrps-logs:/logs
-      # 可选：挂载静态 UI 目录
-      # - ./web/xrps/dist:/ui:ro
     ports:
-      - "8080:8080"   # XRPS API/UI
+      - "8080:8080"   # XRPS API
       # 下面这些端口仅为示例，取决于你在 XRPS 中创建的隧道配置
       # - "9443:9443"   # REALITY handshake 端口（示例）
       # - "31234:31234" # Tunnel entry 端口（示例）
@@ -51,10 +47,8 @@ services:
       # 持久化 XRPC 状态与配置：/home/app/xrpc 与 ~/xrp/xray.bridge.json
       - xrpc-data:/home/app
       - xrpc-logs:/logs
-      # 可选：挂载静态 UI 目录
-      # - ./web/xrpc/dist:/ui:ro
     ports:
-      - "8081:8081"   # XRPC API/UI
+      - "8081:8081"   # XRPC API
 
 volumes:
   xrps-data: {}

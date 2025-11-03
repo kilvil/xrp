@@ -632,6 +632,11 @@ func spaFileServer(root http.FileSystem) http.Handler {
     fileServer := http.FileServer(root)
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         upath := r.URL.Path
+        // Explicitly drop legacy "/ui" compatibility to avoid redirect loops from old proxies
+        if strings.HasPrefix(upath, "/ui") {
+            http.NotFound(w, r)
+            return
+        }
         if upath == "/" || upath == "" {
             // serve index.html
             r2 := new(http.Request)

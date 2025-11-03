@@ -127,7 +127,7 @@ systemd 单元关键设置（由脚本创建）：
 - ExecStart: `/usr/local/bin/xrp -addr :8080`
 
 安装后面板地址：
-- `http://<服务器IP>:8080/`
+- `http://<服务器IP>:8080/`（仅根路径，已移除历史兼容 `/ui` 路由）
 
 ## Docker
 
